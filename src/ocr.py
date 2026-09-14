@@ -48,6 +48,13 @@ _TS_RES = [
         r"(\d{1,2})/(\d{1,2})/(\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP])\.?\s?M\.?",
         re.IGNORECASE,
     ),
+    # Time without a date, e.g. "Clock In:08:00AM" — OCR often glues the
+    # words together and misreads the date. Assume today; this regex runs
+    # LAST so dated matches claim their text first.
+    re.compile(
+        r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP])\.?\s?M\.?",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -80,7 +87,7 @@ def parse_photo_timestamp(text: str) -> dict | None:
                 date = datetime.date(int(year), int(month), int(day))
                 return {"date": date.isoformat(), "time": f"{int(hh):02d}:{int(mm):02d}",
                         "raw": m.group(0).strip()}
-            else:
+            elif rx is _TS_RES[2]:
                 month, day, year, hh, mm, _ss, ap = g
                 year = int(year) if len(year) == 4 else 2000 + int(year)
                 h = int(hh)
@@ -91,19 +98,39 @@ def parse_photo_timestamp(text: str) -> dict | None:
                 date = datetime.date(year, int(month), int(day))
                 return {"date": date.isoformat(), "time": f"{h:02d}:{int(mm):02d}",
                         "raw": m.group(0).strip()}
+            else:
+                # Time-only match (no date found in the text): assume today.
+                hh, mm, _ss, ap = g
+                h = int(hh)
+                if ap.upper() == "P" and h != 12:
+                    h += 12
+                if ap.upper() == "A" and h == 12:
+                    h = 0
+                date = datetime.date.today()
+                return {"date": date.isoformat(), "time": f"{h:02d}:{int(mm):02d}",
+                        "raw": m.group(0).strip()}
         except ValueError:
             continue
     return None
 
 
 def find_all_timestamps(text: str) -> list[dict]:
-    """Find every timestamp in OCR text (for weekly timesheet photo import)."""
+    """Find every timestamp in OCR text (for weekly timesheet photo import).
+
+    Dated patterns run first and claim their spans, so the time-only
+    fallback never double-counts a timestamp that already has a date.
+    """
     found: list[dict] = []
     seen: set[str] = set()
+    used: list[tuple[int, int]] = []
     for rx in _TS_RES:
         for m in rx.finditer(text):
+            s, e = m.span()
+            if any(s < ue and e > us for us, ue in used):
+                continue
             parsed = parse_photo_timestamp(m.group(0))
             if parsed and parsed["raw"] not in seen:
                 seen.add(parsed["raw"])
                 found.append(parsed)
+                used.append((s, e))
     return found

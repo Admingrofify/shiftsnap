@@ -52,13 +52,11 @@ def get_anon_client():
 
 
 def _cookie_manager():
-    import streamlit as st
-    cm = st.session_state.get("cookie_manager")
-    if cm is None:
-        from extra_streamlit_components import CookieManager
-        cm = CookieManager()
-        st.session_state.cookie_manager = cm
-    return cm
+    # Fresh instance on every call: CookieManager reads the browser's
+    # cookies into self.cookies only when constructed, so a cached
+    # instance would keep serving the first run's (empty) values forever.
+    from extra_streamlit_components import CookieManager
+    return CookieManager()
 
 
 def _save_session(res) -> dict:
@@ -85,18 +83,21 @@ def persist_session_cookie() -> None:
     """(Re)write the login cookie while a session is active.
 
     Called on every script run; the write happens during a completed
-    render so the browser reliably executes it. Once per session is
-    enough — the cookie then lives in the browser for COOKIE_DAYS.
+    render so the browser reliably executes it. The write is retried
+    until the cookie actually reads back, so a single missed render
+    can't silently break reload persistence.
     """
     import streamlit as st
     sess = st.session_state.get("sb_session")
-    if not sess or st.session_state.get("cookie_persisted"):
+    if not sess:
         return
     try:
-        _cookie_manager().set(
+        cm = _cookie_manager()
+        if cm.get(COOKIE_NAME):
+            return  # already persisted
+        cm.set(
             COOKIE_NAME, json.dumps(sess),
             expires_at=datetime.now() + timedelta(days=COOKIE_DAYS))
-        st.session_state.cookie_persisted = True
     except Exception:
         pass
 
@@ -105,14 +106,16 @@ def restore_session() -> None:
     """Restore a persisted login from the cookie after a page reload.
 
     Note: extra-streamlit-components has no ready() API. On a cold load
-    get_all() returns {} until the frontend reports back, which triggers
-    an automatic rerun — then the cookie is picked up.
+    get() returns None until the frontend reports back, which triggers
+    an automatic rerun — then the cookie is picked up. get() (not
+    get_all()) is used because it reads the cookies captured when this
+    instance was constructed.
     """
     import streamlit as st
     if st.session_state.get("sb_session"):
         return
     try:
-        raw = _cookie_manager().get_all().get(COOKIE_NAME)
+        raw = _cookie_manager().get(COOKIE_NAME)
     except Exception:
         return
     if not raw:

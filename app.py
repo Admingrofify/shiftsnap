@@ -138,11 +138,9 @@ def store_punch(kind: str, **kw):
     if kind == "in":
         store.add_punch(today, now, None, **kw)
     else:
-        open_shifts = [s for s in store.list_shifts(today, today)
-                       if not s.get("time_out")]
-        if open_shifts:
-            s = open_shifts[-1]
-            store.update_punch(today, s["time_in"], time_out=now, **kw)
+        s = store.open_shift()
+        if s and s.get("date") == today and not s.get("time_out"):
+            store.update_punch(s["date"], s["time_in"], time_out=now, **kw)
         else:
             store.add_punch(today, None, now, **kw)
 
@@ -261,6 +259,8 @@ if page == "⏱ Clock":
     # today at a glance
     today = date.today().isoformat()
     todays = store.list_shifts(today, today)
+    # Supabase store returns a date-keyed dict; local store returns a list.
+    todays = todays.get(today, []) if isinstance(todays, dict) else todays
     mins = sum(net_minutes(s) for s in todays if s.get("time_out"))
     pay = round(mins / 60 * (hourly_rate or 0), 2) if hourly_rate else None
     st.markdown('<div class="stat-row">', unsafe_allow_html=True)
@@ -434,7 +434,9 @@ elif page == "💬 Ask":
         with st.chat_message("assistant"):
             with st.spinner("…"):
                 try:
-                    reply = _agent().chat(prompt)
+                    # Strands agents are invoked by calling them; the
+                    # result stringifies to the reply text.
+                    reply = str(_agent()(prompt))
                 except Exception as exc:
                     reply = f"Something went wrong: {exc}"
             st.markdown(reply)
