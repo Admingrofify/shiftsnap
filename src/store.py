@@ -20,15 +20,20 @@ DEFAULT_PATH = Path.home() / ".shiftsnap" / "shifts.json"
 def normalize_time(raw: str) -> str:
     """Normalize human time input to 24h 'HH:MM'.
 
-    Accepts: '6:58 AM', '6:58am', '6:58 a.m.', '18:58', '6:58', '06:58 PM'...
+    Accepts: '6:58 AM', '6:58am', '6:58 a.m.', '18:58', '6:58', '9 AM',
+    '12' (bare hour -> HH:00), '06:58 PM'...
     """
     s = raw.strip().lower().replace(".", "")
     m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s?m?\.?$", s)
     if not m:
         m = re.match(r"^(\d{1,2}):(\d{2})$", s)
         if not m:
-            raise ValueError(f"Could not understand time: {raw!r}")
-        h, mi, ap = int(m.group(1)), m.group(2), None
+            m = re.match(r"^(\d{1,2})$", s)
+            if not m:
+                raise ValueError(f"Could not understand time: {raw!r}")
+            h, mi, ap = int(m.group(1)), "00", None
+        else:
+            h, mi, ap = int(m.group(1)), m.group(2), None
     else:
         h, mi, ap = int(m.group(1)), m.group(2) or "00", m.group(3)
     mi = int(mi)
@@ -75,7 +80,11 @@ def to_minutes(hhmm: str) -> int:
 
 
 def net_minutes(shift: dict) -> int:
+    if not shift.get("time_out"):
+        return 0  # open shift: clocked in, not yet out
     gross = to_minutes(shift["time_out"]) - to_minutes(shift["time_in"])
+    if gross <= 0:
+        gross += 24 * 60  # overnight shift past midnight
     if shift.get("break_start") and shift.get("break_end"):
         gross -= to_minutes(shift["break_end"]) - to_minutes(shift["break_start"])
     return gross
@@ -129,6 +138,58 @@ class ShiftStore:
         shift["net"] = fmt_duration(net_minutes(shift))
         return {"date": date, **shift}
 
+    def punch(self, date: str, time: str, comment: str = "") -> dict:
+        """Clock in or out from a timestamp (e.g. a photo snap).
+
+        If there is an open shift (clocked in, no clock-out yet) on `date`
+        — or on the previous day for overnight shifts — this punch closes it.
+        Otherwise it opens a new shift with `time` as clock-in.
+        Returns {"action": "in"|"out", "date": ..., "time_in": ..., ...}.
+        """
+        date = normalize_date(date)
+        time = normalize_time(time)
+        day = datetime.date.fromisoformat(date)
+
+        # find an open shift: same day first, then previous day (overnight)
+        open_ref = None
+        for cand in (date, (day - datetime.timedelta(days=1)).isoformat()):
+            for i, s in enumerate(self._data.get(cand, [])):
+                if not s.get("time_out"):
+                    open_ref = (cand, i)
+                    break
+            if open_ref:
+                break
+
+        if open_ref:
+            cand, i = open_ref
+            s = self._data[cand][i]
+            s["time_out"] = time
+            if comment and comment not in s.get("comment", ""):
+                s["comment"] = (s.get("comment", "") + " " + comment).strip()
+            self._data[cand].sort(key=lambda x: x["time_in"])
+            self.save()
+            return {"action": "out", "date": cand,
+                    "time_in": s["time_in"], "time_out": time,
+                    "net": fmt_duration(net_minutes(s))}
+
+        shift = {"time_in": time, "time_out": None,
+                 "break_start": None, "break_end": None, "comment": comment}
+        shifts = self._data.setdefault(date, [])
+        shifts.append(shift)
+        shifts.sort(key=lambda s: s["time_in"])
+        self.save()
+        return {"action": "in", "date": date, "time_in": time,
+                "time_out": None, "net": "0:00"}
+
+    def open_shifts(self) -> list[dict]:
+        """All shifts that are clocked in but not yet out."""
+        out = []
+        for date, shifts in self._data.items():
+            for s in shifts:
+                if not s.get("time_out"):
+                    out.append({"date": date, **s})
+        return sorted(out, key=lambda r: (r["date"], r["time_in"]))
+
     def list_shifts(self, start: str | None = None, end: str | None = None) -> dict[str, list[dict]]:
         data = self._data
         if start:
@@ -159,14 +220,20 @@ class ShiftStore:
         end = normalize_date(end)
         total_min = 0
         days = 0
+        open_count = 0
         for date, shifts in self._data.items():
             if start <= date <= end:
                 days += 1
-                total_min += sum(net_minutes(s) for s in shifts)
+                for s in shifts:
+                    if s.get("time_out"):
+                        total_min += net_minutes(s)
+                    else:
+                        open_count += 1
         approved_min = min(total_min, days * 8 * 60)
         return {
             "start": start, "end": end,
             "days_worked": days,
+            "open_shifts": open_count,
             "total_hours": fmt_duration(total_min),
             "total_decimal": round(total_min / 60, 2),
             "approved_hours": fmt_duration(approved_min),

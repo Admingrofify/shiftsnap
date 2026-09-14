@@ -36,8 +36,14 @@ class DemoModel(Model):
         raise NotImplementedError("DemoModel does not support structured output")
 
     # ---- intent parsing -------------------------------------------------
-    TIME_RE = re.compile(r"(\d{1,2}:\d{2}\s*(?:[AaPp]\.?[Mm]\.?)?)")
-    DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|[A-Za-z]{3,9}\s+\d{1,2}(?:\s*,?\s*\d{4})?)")
+    TIME_RE = re.compile(
+        r"(\d{1,2}:\d{2}\s*(?:[AaPp]\.?[Mm]\.?)?|\d{1,2}\s*[AaPp]\.?[Mm]\.?)")
+    DATE_RE = re.compile(
+        r"(\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+        r"[a-z]*\s+\d{1,2}(?:\s*,?\s*\d{4})?)", re.IGNORECASE)
+    BREAK_RE = re.compile(
+        r"break\s+(\d{1,2}(?::\d{2})?\s*(?:[AaPp]\.?[Mm]\.?)?)\s*[-–]\s*"
+        r"(\d{1,2}(?::\d{2})?\s*(?:[AaPp]\.?[Mm]\.?)?)", re.IGNORECASE)
 
     def _parse_log(self, text: str) -> dict | None:
         times = [t.strip() for t in self.TIME_RE.findall(text)]
@@ -45,9 +51,10 @@ class DemoModel(Model):
         if len(times) < 2 or not dates:
             return None
         args: dict = {"date": dates[0], "time_in": times[0], "time_out": times[1]}
-        if "break" in text.lower() and len(times) >= 4:
-            args["break_start"] = times[2]
-            args["break_end"] = times[3]
+        bm = self.BREAK_RE.search(text)
+        if bm:
+            args["break_start"] = bm.group(1).strip()
+            args["break_end"] = bm.group(2).strip()
         return args
 
     def _parse_range(self, text: str) -> tuple[str, str] | None:
@@ -118,6 +125,16 @@ class DemoModel(Model):
 
         text = last_user_text
         low = text.lower()
+
+        if ("punch" in low or "photo" in low or "clock in" in low
+                or "clock out" in low or "clocked" in low or "snap" in low):
+            from .ocr import parse_photo_timestamp
+            parsed = parse_photo_timestamp(text)
+            if parsed:
+                return ("Reading the timestamp from your photo.",
+                        [{"name": "punch_clock", "input": {"timestamp": text}}])
+            return ("I couldn't read a timestamp from that photo — make sure the "
+                    "time overlay is visible and try again."), []
 
         if "summary" in low or "summarize" in low or "total" in low:
             rng = self._parse_range(text)

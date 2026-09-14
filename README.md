@@ -4,9 +4,25 @@
 
 Hourly workers lose real money to messy timesheets: timestamp photos, mental math,
 unpaid breaks forgotten, under-reported hours. ShiftSnap is an AI agent that runs
-quietly in the background of your work life — you just tell it your shifts in plain
-English, and it logs them, totals your pay period, flags missing days, and builds a
-clean Excel timesheet ready to submit.
+quietly in the background of your work life — **snap a photo of your timestamp**
+when you clock in and out, or just tell it your shifts in plain English, and it
+logs them, totals your pay period, flags missing days, and builds a clean Excel
+timesheet ready to submit.
+
+## 📸 Snap a timestamp photo
+
+The fastest way to log: photograph your clock-in / clock-out screen.
+
+```
+You:  [uploads timestamp photo]
+Agent: 🔍 reading… "Sep 14, 2026 at 6:09:04 AM"
+Agent: ✅ Clocked in 2026-09-14 at 06:09. Snap your clock-out photo when the shift ends.
+You:  [uploads clock-out photo]
+Agent: ✅ Clocked out at 22:26. Shift 06:09 → 22:26, net 16:17.
+```
+
+ShiftSnap OCRs the photo, extracts the timestamp overlay, and pairs clock-in/out
+punches into shifts — including overnight shifts past midnight.
 
 ## Demo
 

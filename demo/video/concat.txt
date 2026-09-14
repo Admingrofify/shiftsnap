@@ -1,0 +1,8 @@
+file '/home/hatch/workspace/shiftsnap/demo/video/01_title.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/02_problem.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/03_who.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/04_demo_log.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/05_demo_summary.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/06_demo_excel.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/07_arch.mp4'
+file '/home/hatch/workspace/shiftsnap/demo/video/08_closing.mp4'

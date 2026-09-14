@@ -92,7 +92,7 @@ def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) ->
             brk = ""
             if s.get("break_start") and s.get("break_end"):
                 brk = f"{s['break_start']}-{s['break_end']}"
-            vals = [key, day.strftime("%a"), s["time_in"], s["time_out"], brk,
+            vals = [key, day.strftime("%a"), s["time_in"], s["time_out"] or "—", brk,
                     fmt_duration(mins), round(mins / 60, 2),
                     fmt_duration(approved), fmt_duration(mins - approved),
                     s.get("comment", "")]

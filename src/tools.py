@@ -9,6 +9,7 @@ from pathlib import Path
 from strands import tool
 
 from .store import ShiftStore, fmt_duration, net_minutes
+from .ocr import parse_photo_timestamp
 from .timesheet import generate_timesheet as _generate_timesheet
 
 
@@ -81,6 +82,8 @@ def make_tools(store: ShiftStore | None = None):
         out = (f"Pay period {s['start']} to {s['end']}: {s['days_worked']} day(s) worked, "
                f"total {s['total_hours']} ({s['total_decimal']}h), "
                f"approved {s['approved_hours']}, extra {s['extra_hours']}.")
+        if s.get("open_shifts"):
+            out += f" {s['open_shifts']} shift(s) still clocked in (no clock-out yet)."
         if missing:
             out += f" Missing (weekday) entries: {', '.join(missing[:5])}."
         return out
@@ -104,4 +107,33 @@ def make_tools(store: ShiftStore | None = None):
                 f"Covers {s['days_worked']} day(s), {s['total_hours']} total "
                 f"({s['approved_hours']} approved, {s['extra_hours']} extra).")
 
-    return [log_shift, list_shifts, pay_period_summary, generate_timesheet]
+    @tool
+    def punch_clock(timestamp: str) -> str:
+        """Clock in or out from a photo timestamp (OCR text from a time snap).
+
+        Args:
+            timestamp: Raw text containing a timestamp, e.g.
+                'Sep 14, 2026 at 6:09:04 AM' (as read from a photo).
+        Returns:
+            Confirmation of clock-in, or clock-out with the completed
+            shift's net hours.
+        """
+        parsed = parse_photo_timestamp(timestamp)
+        if not parsed:
+            return (f"Could not find a readable timestamp in: {timestamp!r}. "
+                    "Try a clearer photo of the timestamp overlay.")
+        try:
+            rec = store.punch(parsed["date"], parsed["time"],
+                              comment=f"photo snap {parsed['raw']}")
+        except ValueError as exc:
+            return f"Could not log punch: {exc}"
+        if rec["action"] == "in":
+            return (f"Clocked in {rec['date']} at {rec['time_in']} "
+                    f"(from photo: {parsed['raw']}). Snap your clock-out photo "
+                    "when the shift ends.")
+        return (f"Clocked out {rec['date']} at {rec['time_out']} "
+                f"(from photo: {parsed['raw']}). Shift {rec['time_in']} -> "
+                f"{rec['time_out']}, net {rec['net']}.")
+
+    return [log_shift, list_shifts, pay_period_summary, generate_timesheet,
+            punch_clock]
