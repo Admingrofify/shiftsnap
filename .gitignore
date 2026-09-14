@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+timesheets/
+profile.json
+.streamlit/
