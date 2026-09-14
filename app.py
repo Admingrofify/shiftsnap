@@ -16,6 +16,7 @@ from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
 from src.sb_auth import (authed_client, consume_callback, current_user,
                          send_magic_link, sign_out)
+from src.payslip import generate_payslip
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
 
@@ -332,6 +333,22 @@ elif page == "📅 Timesheet":
                                     "officedocument.spreadsheetml.sheet")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown('<div class="card"><h3>🧾 Payslip (PDF)</h3>',
+                unsafe_allow_html=True)
+    st.caption("ADP-style earnings statement: regular + overtime pay, YTD totals.")
+    if not hourly_rate:
+        st.info("Set your hourly pay in 👤 Profile to generate a payslip.")
+    elif st.button("Generate payslip", type="primary"):
+        path = generate_payslip(start, end, store,
+                                worker["id"] if SB else None,
+                                worker_name, hourly_rate)
+        with open(path, "rb") as f:
+            st.download_button("⬇️ Download payslip",
+                               data=f.read(),
+                               file_name=os.path.basename(path),
+                               mime="application/pdf")
+    st.markdown("</div>", unsafe_allow_html=True)
+
 # ------------------------------------------------------------------ IMPORT
 elif page == "📸 Import Photo":
     st.markdown('<div class="hero"><h1>📸 Import Photo</h1>'
@@ -470,5 +487,24 @@ elif page == "🛠 Team":
                                    file_name=os.path.basename(path),
                                    mime="application/vnd.openxmlformats-"
                                         "officedocument.spreadsheetml.sheet")
+        st.markdown("---")
+        st.markdown('<div class="card"><h3>🧾 Worker payslip</h3>',
+                    unsafe_allow_html=True)
+        wnames = [t["worker"] for t in team]
+        wname = st.selectbox("Worker", wnames)
+        if st.button("Generate payslip", type="primary", key="team_payslip"):
+            w = next(x for x in store.list_workers() if x["name"] == wname)
+            rate = w.get("hourly_rate") or 0
+            if not rate:
+                st.warning(f"{wname} hasn't set an hourly rate yet.")
+            else:
+                path = generate_payslip(start, end, store, w["id"], wname,
+                                        rate)
+                with open(path, "rb") as f:
+                    st.download_button("⬇️ Download payslip",
+                                       data=f.read(),
+                                       file_name=os.path.basename(path),
+                                       mime="application/pdf")
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.info("No shifts in this period.")
