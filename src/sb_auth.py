@@ -120,10 +120,15 @@ def restore_session() -> None:
         return
     if not raw:
         return
-    try:
-        sess = json.loads(raw)
-    except Exception:
-        return
+    # universal-cookie JSON-parses cookie values on read, so a session
+    # cookie comes back as a dict; handle a raw string too, just in case.
+    if isinstance(raw, dict):
+        sess = raw
+    else:
+        try:
+            sess = json.loads(raw)
+        except Exception:
+            return
     if isinstance(sess, dict) and sess.get("refresh_token"):
         st.session_state.sb_session = sess
 
