@@ -51,12 +51,23 @@ def get_anon_client():
     return create_client(url, key)
 
 
-def _cookie_manager():
-    # Fresh instance on every call: CookieManager reads the browser's
-    # cookies into self.cookies only when constructed, so a cached
-    # instance would keep serving the first run's (empty) values forever.
+def _cookie_manager(key: str = "ss_init"):
+    # CookieManager reads the browser's cookies into self.cookies only when
+    # its iframe first mounts, and the iframe reports that value exactly
+    # once. A stable key therefore gives a trustworthy one-shot read after
+    # a page reload (fresh mount), but the value then goes stale for the
+    # rest of the session — never treat it as live. Fresh keys are used
+    # below whenever a write must actually reach the browser.
     from extra_streamlit_components import CookieManager
-    return CookieManager()
+    return CookieManager(key=key)
+
+
+def _cookie_nonce() -> int:
+    """Monotonic counter so each cookie write mounts a fresh iframe."""
+    import streamlit as st
+    n = int(st.session_state.get("_ss_ck_nonce", 0)) + 1
+    st.session_state["_ss_ck_nonce"] = n
+    return n
 
 
 def _save_session(res) -> dict:
@@ -73,31 +84,66 @@ def _save_session(res) -> dict:
         "email": res.user.email,
     }
     st.session_state.sb_session = sess
+    # Fresh login: allow the cookie to be (re)written and make sure a
+    # previous in-session logout doesn't block this session.
+    st.session_state["_ss_logged_out"] = False
+    st.session_state["_ss_cookie_ok"] = False
     # NOTE: the cookie itself is written by persist_session_cookie() during
     # a normal render. Writing it here would race with the st.rerun() that
     # follows login, and the browser might never execute it.
     return {"id": res.user.id, "email": res.user.email}
 
 
-def persist_session_cookie() -> None:
-    """(Re)write the login cookie while a session is active.
+def _parse_session_cookie(raw):
+    """Parse the session cookie.
 
-    Called on every script run; the write happens during a completed
-    render so the browser reliably executes it. The write is retried
-    until the cookie actually reads back, so a single missed render
-    can't silently break reload persistence.
+    universal-cookie JSON-parses cookie values on read, so the session
+    cookie comes back as a dict; accept a raw JSON string too.
+    Returns the session dict, or None when there is no usable session.
+    """
+    if isinstance(raw, dict):
+        sess = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            sess = json.loads(raw)
+        except Exception:
+            return None
+    else:
+        return None
+    if isinstance(sess, dict) and sess.get("refresh_token"):
+        return sess
+    return None
+
+
+def persist_session_cookie() -> None:
+    """Write the login cookie once per login.
+
+    Called on every script run, but the write itself happens exactly once:
+    a fresh component key mounts a fresh iframe whose mount effect writes
+    document.cookie, then _ss_cookie_ok gates every later run. (Re-rendering
+    the same key would reuse the mounted iframe and never re-fire the
+    write, which is why logout/login cycles need fresh keys.)
     """
     import streamlit as st
     sess = st.session_state.get("sb_session")
     if not sess:
         return
+    if st.session_state.get("_ss_cookie_ok"):
+        return  # already written for this login
     try:
-        cm = _cookie_manager()
-        if cm.get(COOKIE_NAME):
-            return  # already persisted
+        cm = _cookie_manager(key=f"ss_init_w_{_cookie_nonce()}")
+        payload = json.dumps({
+            "access_token": sess.get("access_token"),
+            "refresh_token": sess.get("refresh_token"),
+            "user_id": sess.get("user_id"),
+            "email": sess.get("email"),
+        })
         cm.set(
-            COOKIE_NAME, json.dumps(sess),
-            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS))
+            COOKIE_NAME, payload,
+            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
+            path="/", same_site="strict",
+            key=f"ss_set_{_cookie_nonce()}")
+        st.session_state["_ss_cookie_ok"] = True
     except Exception:
         pass
 
@@ -105,31 +151,23 @@ def persist_session_cookie() -> None:
 def restore_session() -> None:
     """Restore a persisted login from the cookie after a page reload.
 
-    Note: extra-streamlit-components has no ready() API. On a cold load
-    get() returns None until the frontend reports back, which triggers
-    an automatic rerun — then the cookie is picked up. get() (not
-    get_all()) is used because it reads the cookies captured when this
-    instance was constructed.
+    The "ss_init" iframe reads document.cookie when it mounts (which is
+    exactly what a full page reload does) and reports once; the rerun it
+    triggers then picks the session up. Within a session the value is
+    never re-read, so a logout can never resurrect a stale session here —
+    sign_out() additionally sets _ss_logged_out as a hard guard.
     """
     import streamlit as st
     if st.session_state.get("sb_session"):
         return
+    if st.session_state.get("_ss_logged_out"):
+        return  # signed out in this session: stay signed out
     try:
         raw = _cookie_manager().get(COOKIE_NAME)
     except Exception:
         return
-    if not raw:
-        return
-    # universal-cookie JSON-parses cookie values on read, so a session
-    # cookie comes back as a dict; handle a raw string too, just in case.
-    if isinstance(raw, dict):
-        sess = raw
-    else:
-        try:
-            sess = json.loads(raw)
-        except Exception:
-            return
-    if isinstance(sess, dict) and sess.get("refresh_token"):
+    sess = _parse_session_cookie(raw)
+    if sess:
         st.session_state.sb_session = sess
 
 
@@ -160,7 +198,10 @@ def sign_up_or_in(email: str, password: str) -> dict:
 def authed_client():
     """Supabase client scoped to the logged-in worker (RLS enforced).
 
-    Returns None when nobody is logged in.
+    Returns None when nobody is logged in. Retries once: a transient
+    network blip must not sign the worker out (app.py signs out + reruns
+    when this returns None, so a flaky first attempt would wedge the app
+    into a sign-out/restore loop).
     """
     import streamlit as st
     sess = st.session_state.get("sb_session")
@@ -169,9 +210,16 @@ def authed_client():
     client = get_anon_client()
     try:
         client.auth.set_session(sess["access_token"], sess["refresh_token"])
+        return client
+    except Exception:
+        pass
+    try:
+        import time
+        time.sleep(1)
+        client.auth.set_session(sess["access_token"], sess["refresh_token"])
+        return client
     except Exception:
         return None
-    return client
 
 
 def current_user() -> dict | None:
@@ -187,14 +235,19 @@ def sign_out() -> None:
         if client:
             client.auth.sign_out()
     finally:
+        # Delete with a FRESH component key: a reused "delete" iframe never
+        # re-fires its effect, so a second logout in one session would
+        # silently skip the browser-side delete.
         try:
-            _cookie_manager().delete(COOKIE_NAME)
+            _cookie_manager().delete(
+                COOKIE_NAME, key=f"ss_del_{_cookie_nonce()}")
         except Exception:
-            try:  # older CookieManager without delete(): expire it instead
-                _cookie_manager().set(
-                    COOKIE_NAME, "",
-                    expires_at=datetime.now() - timedelta(days=1))
-            except Exception:
-                pass
+            pass
+        # Hard in-session guard: the cookie iframe's saved value goes stale
+        # after a delete (it only reports on mount), so without this flag
+        # restore_session() would resurrect the session on the next rerun
+        # and logout would appear to do nothing.
+        st.session_state["_ss_logged_out"] = True
+        st.session_state["_ss_cookie_ok"] = False
         for k in ("sb_session", "worker", "chat"):
             st.session_state.pop(k, None)
