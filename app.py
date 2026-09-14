@@ -14,8 +14,8 @@ from streamlit_geolocation import streamlit_geolocation
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
-from src.sb_auth import (authed_client, consume_callback, current_user,
-                         send_magic_link, sign_out)
+from src.sb_auth import (authed_client, current_user, sign_out,
+                         sign_up_or_in)
 from src.payslip import generate_payslip
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
@@ -148,30 +148,27 @@ def login_screen():
     st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
                 "<p>Snap a timestamp. Log the shift. Get paid.</p></div>",
                 unsafe_allow_html=True)
-    st.markdown('<div class="card"><h3>🔑 Login — free, no password</h3>',
+    st.markdown('<div class="card"><h3>🔑 Login — free</h3>',
                 unsafe_allow_html=True)
-    st.caption("Enter your work email and we'll send you a one-tap login link.")
+    st.caption("Use your work email. First login creates your account.")
     email = st.text_input("Work email", placeholder="you@company.com")
-    if st.button("Send me a login link", type="primary",
-                 disabled=not email.strip()):
+    pw = st.text_input("Password", type="password",
+                       placeholder="Min 6 characters",
+                       help="First time here? Pick any password — "
+                            "this creates your account.")
+    if st.button("Login / Sign up", type="primary",
+                 disabled=not (email.strip() and pw)):
         try:
-            send_magic_link(email)
-            st.success(f"Login link sent to {email.strip()} — check your inbox. "
-                       "It expires in an hour.")
+            sign_up_or_in(email, pw)
+            st.rerun()
         except Exception as exc:
-            st.error(f"Couldn't send the link: {exc}")
+            st.error(str(exc))
     st.markdown("</div>", unsafe_allow_html=True)
     st.caption("Your email only identifies your timesheet. Free tier — "
                "nothing is sold or shared.")
 
 
 if SB:
-    if st.query_params.get("token_hash") and not current_user():
-        try:
-            consume_callback()
-            st.rerun()
-        except Exception as exc:
-            st.error(f"That login link didn't work ({exc}). Request a new one.")
     if not current_user():
         login_screen()
         st.stop()
