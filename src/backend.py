@@ -6,7 +6,8 @@ import os
 
 def supabase_configured() -> bool:
     return bool(os.getenv("SUPABASE_URL") and
-                (os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")))
+                (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+                 or os.getenv("SUPABASE_SERVICE_KEY")))
 
 
 def get_store(worker_id: str | None = None):

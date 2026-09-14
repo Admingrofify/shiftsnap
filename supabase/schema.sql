@@ -1,21 +1,24 @@
 -- ShiftSnap v2 schema: multi-worker timesheets on Postgres (Supabase free tier).
 --
--- Run this once in the Supabase SQL editor (or paste into a migration).
--- The demo app connects with the SERVICE_ROLE key server-side and scopes
--- every query by worker in application code.
+-- Run once in the Supabase SQL editor (safe to re-run: all idempotent).
 --
--- Upgrade path: point employee_id at auth.users instead of workers(id) and
--- switch the app to the anon key + Supabase Auth (magic link). The RLS
--- policies below are written for that world; with the service key they are
--- bypassed, so the app enforces worker scoping itself.
+-- Identity: Supabase Auth (email magic link). Each worker signs in with
+-- their email; auth.users.id becomes workers.id, and Row Level Security
+-- guarantees workers can only see their own shifts. The app connects with
+-- the ANON key and the worker's own JWT — no service_role key needed.
+--
+-- Dashboard setup (one time): Authentication -> URL Configuration ->
+--   Site URL = https://shiftssnap.com
+--   Redirect URLs += https://shiftssnap.com/**
 --
 -- Note: time_in/time_out are `time` (not timestamptz) on purpose — shift math
 -- is done per work-date and timezones only add bugs here. The work `date`
 -- is stored separately.
 
 create table if not exists workers (
-  id uuid primary key default gen_random_uuid(),
-  name text unique not null,
+  id uuid primary key references auth.users(id) on delete cascade,
+  name text not null,
+  email text,
   created_at timestamptz default now()
 );
 
@@ -45,11 +48,29 @@ alter table workers enable row level security;
 alter table shifts enable row level security;
 alter table admins enable row level security;
 
--- No permissive policies yet: with RLS enabled and no policy, the anon key
--- is fully blocked and only the service_role key (server-side) can read/write.
--- When Supabase Auth is wired up, add e.g.:
---
---   create policy "workers see own shifts" on shifts
---     for all using (employee_id = auth.uid());
---   create policy "admins see all shifts" on shifts
---     for all using (exists (select 1 from admins where worker_id = auth.uid()));
+-- Workers see only their own rows.
+drop policy if exists "workers own shifts" on shifts;
+create policy "workers own shifts" on shifts
+  for all using (employee_id = auth.uid());
+
+drop policy if exists "workers own profile" on workers;
+create policy "workers own profile" on workers
+  for all using (id = auth.uid());
+
+-- Admins (listed in admins table) see everything, for team reports/export.
+drop policy if exists "admins see all shifts" on shifts;
+create policy "admins see all shifts" on shifts
+  for all using (exists (select 1 from admins where worker_id = auth.uid()));
+
+drop policy if exists "admins see all workers" on workers;
+create policy "admins see all workers" on workers
+  for select using (exists (select 1 from admins where worker_id = auth.uid()));
+
+-- Admins can check their own admin row (needed for the in-app admin check).
+drop policy if exists "users see own admin row" on admins;
+create policy "users see own admin row" on admins
+  for select using (worker_id = auth.uid());
+
+-- To make someone an admin, run (as a SQL editor admin):
+--   insert into admins (worker_id)
+--   select id from workers where email = 'boss@company.com';

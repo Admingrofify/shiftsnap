@@ -18,12 +18,12 @@ import streamlit as st
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
+from src.sb_auth import (authed_client, consume_callback, current_user,
+                         send_magic_link, sign_out)
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
 
 st.set_page_config(page_title="ShiftSnap", page_icon="⏱️", layout="centered")
-
-ADMIN_PIN = os.getenv("ADMIN_PIN", "1234")  # demo default; override in production
 
 CSS = """
 <style>
@@ -78,44 +78,73 @@ def get_gps() -> dict | None:
     return {"lat": lat, "lng": lng, "acc": loc.get("accuracy") or 0}
 
 
-# ---------------------------------------------------------------- worker gate
-def worker_gate(store):
+# ---------------------------------------------------------------- auth gate
+# Free login: email magic link via Supabase Auth (no password, no cost).
+# The worker's JWT scopes every query through Row Level Security.
+def auth_gate():
+    # Returning from the email link? ?token_hash=...&type=magiclink
+    if st.query_params.get("token_hash") and not current_user():
+        try:
+            consume_callback()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"That login link didn't work ({exc}). Request a new one below.")
+    if current_user():
+        return
     st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
                 "<p>Snap a timestamp. Log the shift. Get paid.</p></div>",
                 unsafe_allow_html=True)
-    st.markdown('<div class="card"><h3>🔑 Login — who\'s clocking in?</h3>',
+    st.markdown('<div class="card"><h3>🔑 Login — free, no password</h3>',
                 unsafe_allow_html=True)
-    workers = store.list_workers()
-    if workers:
-        cols = st.columns(min(3, len(workers)))
-        for i, w in enumerate(workers):
-            with cols[i % len(cols)]:
-                if st.button(w["name"], key=f"pick_{w['id']}",
-                             use_container_width=True):
-                    st.session_state.worker = w
-                    st.rerun()
-    name = st.text_input("Or enter your name", placeholder="e.g. Jordan Lee")
-    if st.button("Start →", use_container_width=True, type="primary",
-                 disabled=not name.strip()):
-        st.session_state.worker = store.get_or_create_worker(name.strip())
-        st.rerun()
+    st.caption("Enter your work email and we'll send you a one-tap login link.")
+    email = st.text_input("Work email", placeholder="you@company.com")
+    if st.button("📧 Send me a login link", type="primary",
+                 use_container_width=True, disabled=not email.strip()):
+        try:
+            send_magic_link(email)
+            st.success(f"Login link sent to {email.strip()} — check your inbox "
+                       "(and spam). It expires in an hour.")
+        except Exception as exc:
+            st.error(f"Couldn't send the link: {exc}")
     st.markdown("</div>", unsafe_allow_html=True)
-    st.caption("Your punches are stored in Supabase (free tier). "
-               "Only timestamps are used — no personal data leaves your phone.")
+    st.caption("Your email only identifies your timesheet — nothing else. "
+               "Supabase free tier; no personal data is sold or shared.")
 
 
 if SB:
-    _gate_store = get_store()
+    auth_gate()  # stops here until logged in
+    user = current_user()
+    client = authed_client()
+    if not client:
+        sign_out()
+        st.rerun()
+    store = get_store()  # placeholder, replaced below with authed client
+    from src.sb_store import SupabaseShiftStore
+    store = SupabaseShiftStore(employee_id=user["id"], client=client)
     if "worker" not in st.session_state:
-        worker_gate(_gate_store)
+        # First login: pick a display name for the timesheet.
+        st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
+                    "<p>One last step.</p></div>", unsafe_allow_html=True)
+        st.markdown('<div class="card"><h3>👋 What should we call you?</h3>',
+                    unsafe_allow_html=True)
+        dname = st.text_input("Display name",
+                              placeholder="e.g. Jordan Lee",
+                              value=user["email"].split("@")[0])
+        if st.button("Start →", type="primary", use_container_width=True,
+                     disabled=not dname.strip()):
+            st.session_state.worker = store.ensure_worker(dname.strip(),
+                                                           user["email"])
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
         st.stop()
     worker = st.session_state.worker
-    store = get_store(worker["id"])
     worker_label = worker["name"]
+    is_admin = store.is_admin()
 else:
     store = get_store()  # JSON demo mode
     worker = None
     worker_label = "Jordan Lee (demo)"
+    is_admin = False
 
 
 def _agent():
@@ -154,14 +183,11 @@ with st.sidebar:
     if SB:
         st.markdown("---")
         st.markdown(f"👤 **{worker_label}**")
+        st.caption(user["email"])
         if st.button("🚪 Logout", use_container_width=True):
-            for k in ("worker", "chat"):
-                st.session_state.pop(k, None)
+            sign_out()
             st.rerun()
-        pin = st.text_input("Admin PIN", type="password", placeholder="••••")
-        st.session_state.is_admin = (pin == ADMIN_PIN)
-        if pin and not st.session_state.is_admin:
-            st.error("Wrong PIN")
+        st.session_state.is_admin = is_admin
 
 S, E = p_start.isoformat(), p_end.isoformat()
 

@@ -26,13 +26,18 @@ def _hhmm(value) -> str | None:
 class SupabaseShiftStore(ShiftStore):
     """ShiftStore API backed by Supabase Postgres instead of local JSON."""
 
-    def __init__(self, employee_id: str | None = None):
+    def __init__(self, employee_id: str | None = None, client=None):
         # Don't call ShiftStore.__init__ (no local file needed).
         self.employee_id = employee_id
+        if client is not None:
+            # Injected authed client (worker's own JWT -> RLS enforced).
+            self.client = client
+            return
         url = os.getenv("SUPABASE_URL", "")
-        key = os.getenv("SUPABASE_KEY", "") or os.getenv("SUPABASE_SERVICE_KEY", "")
+        key = (os.getenv("SUPABASE_SERVICE_KEY", "")
+               or os.getenv("SUPABASE_KEY", ""))
         if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY env vars are required.")
+            raise RuntimeError("SUPABASE_URL and a Supabase key are required.")
         from supabase import create_client
         self.client = create_client(url, key)
 
@@ -52,6 +57,19 @@ class SupabaseShiftStore(ShiftStore):
             return res.data[0]
         res = (self.client.table("workers").insert({"name": name})
                .select("id,name").execute())
+        return res.data[0]
+
+    def ensure_worker(self, name: str, email: str = "") -> dict:
+        """Worker row for the authed user (id = auth.uid(), RLS-scoped)."""
+        uid = self._emp(None)
+        res = (self.client.table("workers").select("id,name,email")
+               .eq("id", uid).limit(1).execute())
+        if res.data:
+            return res.data[0]
+        name = name.strip() or (email.split("@")[0] if email else "Worker")
+        res = (self.client.table("workers")
+               .insert({"id": uid, "name": name, "email": email or None})
+               .select("id,name,email").execute())
         return res.data[0]
 
     def is_admin(self, employee_id: str) -> bool:
