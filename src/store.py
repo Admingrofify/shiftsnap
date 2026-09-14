@@ -190,7 +190,46 @@ class ShiftStore:
             for s in shifts:
                 if not s.get("time_out"):
                     out.append({"date": date, **s})
-        return sorted(out, key=lambda r: (r["date"], r["time_in"]))
+        return sorted(out, key=lambda r: (r["date"], r["time_in"] or ""))
+
+    def open_shift(self) -> dict | None:
+        """The earliest currently-open shift, or None."""
+        shifts = self.open_shifts()
+        return shifts[0] if shifts else None
+
+    def add_punch(self, date: str, time_in: str | None, time_out: str | None,
+                  source: str = "button", lat=None, lng=None, accuracy=None,
+                  comment: str = "") -> dict:
+        """Insert one shift row: a clock-in, clock-out, or lone punch."""
+        date = normalize_date(date)
+        shift = {"time_in": normalize_time(time_in) if time_in else None,
+                 "time_out": normalize_time(time_out) if time_out else None,
+                 "break_start": None, "break_end": None,
+                 "comment": comment or "", "source": source,
+                 "lat": lat, "lng": lng}
+        shifts = self._data.setdefault(date, [])
+        shifts.append(shift)
+        shifts.sort(key=lambda s: s["time_in"] or "")
+        self.save()
+        return {"date": date, **shift}
+
+    def update_punch(self, date: str, time_in: str,
+                     time_out: str | None = None,
+                     lat=None, lng=None, accuracy=None, **kw) -> dict | None:
+        """Clock out: set time_out (and fresh GPS) on a matching open shift."""
+        date = normalize_date(date)
+        time_in = normalize_time(time_in)
+        for s in self._data.get(date, []):
+            if s.get("time_in") == time_in and not s.get("time_out"):
+                if time_out:
+                    s["time_out"] = normalize_time(time_out)
+                if lat is not None:
+                    s["lat"] = lat
+                if lng is not None:
+                    s["lng"] = lng
+                self.save()
+                return {"date": date, **s}
+        return None
 
     def list_shifts(self, start: str | None = None, end: str | None = None) -> dict[str, list[dict]]:
         data = self._data

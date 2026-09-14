@@ -58,14 +58,18 @@ BEHAVIOR:
 
 def build_agent(store_path: str | Path | None = None,
                 provider: str | None = None,
-                worker_id: str | None = None) -> Agent:
+                worker_id: str | None = None,
+                store=None) -> Agent:
     provider = (provider or os.getenv("MODEL_PROVIDER", "demo")).lower()
-    if store_path and not supabase_configured():
-        from .store import ShiftStore
-        store = ShiftStore(store_path)
-        tools = make_tools(store)
+    if store is None:
+        if store_path and not supabase_configured():
+            from .store import ShiftStore
+            store = ShiftStore(store_path)
+            tools = make_tools(store)
+        else:
+            store = get_store(worker_id)
+            tools = make_tools(store, worker_id=worker_id)
     else:
-        store = get_store(worker_id)
         tools = make_tools(store, worker_id=worker_id)
 
     if provider == "demo":

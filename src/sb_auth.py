@@ -75,13 +75,30 @@ def _save_session(res) -> dict:
         "email": res.user.email,
     }
     st.session_state.sb_session = sess
-    try:  # persist login across page reloads
+    # NOTE: the cookie itself is written by persist_session_cookie() during
+    # a normal render. Writing it here would race with the st.rerun() that
+    # follows login, and the browser might never execute it.
+    return {"id": res.user.id, "email": res.user.email}
+
+
+def persist_session_cookie() -> None:
+    """(Re)write the login cookie while a session is active.
+
+    Called on every script run; the write happens during a completed
+    render so the browser reliably executes it. Once per session is
+    enough — the cookie then lives in the browser for COOKIE_DAYS.
+    """
+    import streamlit as st
+    sess = st.session_state.get("sb_session")
+    if not sess or st.session_state.get("cookie_persisted"):
+        return
+    try:
         _cookie_manager().set(
             COOKIE_NAME, json.dumps(sess),
             expires_at=datetime.now() + timedelta(days=COOKIE_DAYS))
+        st.session_state.cookie_persisted = True
     except Exception:
         pass
-    return {"id": res.user.id, "email": res.user.email}
 
 
 def restore_session() -> None:

@@ -35,6 +35,7 @@ class SupabaseShiftStore(ShiftStore):
             return
         url = os.getenv("SUPABASE_URL", "")
         key = (os.getenv("SUPABASE_SERVICE_KEY", "")
+               or os.getenv("SUPABASE_ANON_KEY", "")
                or os.getenv("SUPABASE_KEY", ""))
         if not url or not key:
             raise RuntimeError("SUPABASE_URL and a Supabase key are required.")
@@ -59,13 +60,20 @@ class SupabaseShiftStore(ShiftStore):
                .select("id,name").execute())
         return res.data[0]
 
+    def get_own_worker(self) -> dict | None:
+        """Worker row for the authed user, or None if never onboarded."""
+        uid = self._emp(None)
+        res = (self.client.table("workers")
+               .select("id,name,email,hourly_rate")
+               .eq("id", uid).limit(1).execute())
+        return res.data[0] if res.data else None
+
     def ensure_worker(self, name: str, email: str = "") -> dict:
         """Worker row for the authed user (id = auth.uid(), RLS-scoped)."""
+        existing = self.get_own_worker()
+        if existing:
+            return existing
         uid = self._emp(None)
-        res = (self.client.table("workers").select("id,name,email,hourly_rate")
-               .eq("id", uid).limit(1).execute())
-        if res.data:
-            return res.data[0]
         name = name.strip() or (email.split("@")[0] if email else "Worker")
         res = (self.client.table("workers")
                .insert({"id": uid, "name": name, "email": email or None})
@@ -104,7 +112,7 @@ class SupabaseShiftStore(ShiftStore):
         return emp
 
     def _row_to_shift(self, row: dict) -> dict:
-        return {"time_in": _hhmm(row["time_in"]),
+        return {"time_in": _hhmm(row.get("time_in")),
                 "time_out": _hhmm(row.get("time_out")),
                 "break_start": _hhmm(row.get("break_start")),
                 "break_end": _hhmm(row.get("break_end")),
@@ -207,6 +215,57 @@ class SupabaseShiftStore(ShiftStore):
                 .is_("time_out", "null").order("date").order("time_in")
                 .execute()).data or []
         return [{"date": r["date"], **self._row_to_shift(r)} for r in rows]
+
+    def open_shift(self, employee_id: str | None = None) -> dict | None:
+        """The earliest currently-open shift, or None."""
+        shifts = self.open_shifts(employee_id)
+        return shifts[0] if shifts else None
+
+    def add_punch(self, date: str, time_in: str | None, time_out: str | None,
+                  employee_id: str | None = None, source: str = "button",
+                  lat=None, lng=None, accuracy=None,
+                  comment: str = "") -> dict:
+        """Insert one shift row: a clock-in, clock-out, or lone punch."""
+        emp = self._emp(employee_id)
+        payload = {"employee_id": emp, "date": normalize_date(date),
+                   "source": source, "lat": lat, "lng": lng,
+                   "accuracy_m": accuracy, "comment": comment or ""}
+        if time_in:
+            payload["time_in"] = normalize_time(time_in)
+        if time_out:
+            payload["time_out"] = normalize_time(time_out)
+        row = (self.client.table("shifts").insert(payload)
+               .select("*").execute()).data[0]
+        return {"date": row["date"], **self._row_to_shift(row)}
+
+    def update_punch(self, date: str, time_in: str,
+                     time_out: str | None = None,
+                     employee_id: str | None = None,
+                     lat=None, lng=None, accuracy=None, **kw) -> dict | None:
+        """Clock out: set time_out (and fresh GPS) on a matching open shift."""
+        emp = self._emp(employee_id)
+        date = normalize_date(date)
+        time_in = normalize_time(time_in)
+        rows = (self.client.table("shifts").select("*")
+                .eq("employee_id", emp).eq("date", date)
+                .eq("time_in", time_in).is_("time_out", "null")
+                .order("id").limit(1).execute()).data or []
+        if not rows:
+            return None
+        patch: dict = {}
+        if time_out:
+            patch["time_out"] = normalize_time(time_out)
+        if lat is not None:
+            patch["lat"] = lat
+        if lng is not None:
+            patch["lng"] = lng
+        if accuracy is not None:
+            patch["accuracy_m"] = accuracy
+        if patch:
+            (self.client.table("shifts").update(patch)
+             .eq("id", rows[0]["id"]).execute())
+        row = {**rows[0], **patch}
+        return {"date": row["date"], **self._row_to_shift(row)}
 
     def clear_date(self, date: str, employee_id: str | None = None) -> None:
         (self.client.table("shifts").delete().eq("employee_id", self._emp(employee_id))

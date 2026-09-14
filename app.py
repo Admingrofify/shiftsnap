@@ -15,8 +15,8 @@ from streamlit_geolocation import streamlit_geolocation
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
-from src.sb_auth import (authed_client, current_user, restore_session,
-                         sign_out, sign_up_or_in)
+from src.sb_auth import (authed_client, current_user, persist_session_cookie,
+                         restore_session, sign_out, sign_up_or_in)
 from src.payslip import generate_payslip
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
@@ -26,6 +26,7 @@ SB = supabase_configured()
 st.set_page_config(page_title="ShiftSnap", page_icon="⏱️", layout="centered")
 
 restore_session()  # re-login from cookie after a page reload
+persist_session_cookie()  # keep the login cookie fresh while logged in
 
 # ------------------------------------------------------------------ styling
 st.markdown("""
@@ -186,20 +187,22 @@ if SB:
     from src.sb_store import SupabaseShiftStore
     store = SupabaseShiftStore(employee_id=user["id"], client=client)
 
-    if "worker" not in st.session_state:
+    worker = store.get_own_worker()
+    if worker is None:
         st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
                     "<p>One last step.</p></div>", unsafe_allow_html=True)
         st.markdown('<div class="card"><h3>👋 What should we call you?</h3>',
                     unsafe_allow_html=True)
         dname = st.text_input("Display name", placeholder="e.g. Jordan Lee",
                               value=user["email"].split("@")[0])
-        if st.button("Start →", type="primary", disabled=not dname.strip()):
-            st.session_state.worker = store.ensure_worker(dname.strip(),
-                                                           user["email"])
-            st.rerun()
+        if st.button("Start →", type="primary"):
+            if not dname.strip():
+                st.error("Please enter a display name.")
+            else:
+                store.ensure_worker(dname.strip(), user["email"])
+                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         st.stop()
-    worker = st.session_state.worker
     is_admin = store.is_admin()
     hourly_rate = worker.get("hourly_rate")
 else:
@@ -366,6 +369,13 @@ elif page == "📸 Import Photo":
                 data = up.getvalue()
                 text = extract_text(data)
                 stamps = find_all_timestamps(text)
+            if not text.strip():
+                st.warning("Couldn't read any text from this photo. "
+                           "Try a clearer photo with large timestamp text.")
+            elif not stamps:
+                st.info("Read the photo but found no timestamps in it.")
+                with st.expander("Show text that was read"):
+                    st.code(text[:800])
             st.session_state.photo_stamps = stamps
             st.session_state.photo_bytes = data
         stamps = st.session_state.get("photo_stamps", [])
@@ -406,7 +416,11 @@ elif page == "💬 Ask":
                 unsafe_allow_html=True)
 
     def _agent():
-        return build_agent(worker_id=worker["id"] if SB else None)
+        if SB:
+            # Reuse the worker's own authenticated store: every agent query
+            # is scoped by Row Level Security to this worker.
+            return build_agent(worker_id=worker["id"], store=store)
+        return build_agent(worker_id=None)
 
     if "chat" not in st.session_state:
         st.session_state.chat = []
