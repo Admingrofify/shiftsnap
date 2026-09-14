@@ -15,6 +15,7 @@ from .backend import get_store
 from .ocr import find_all_timestamps, parse_photo_timestamp
 from .store import ShiftStore, fmt_duration, net_minutes
 from .timesheet import generate_timesheet as _generate_timesheet
+from .nytime import ny_now
 
 
 def make_tools(store=None, worker_id: str | None = None):
@@ -173,7 +174,7 @@ def make_tools(store=None, worker_id: str | None = None):
         Returns:
             Confirmation of clock-in or clock-out with net hours.
         """
-        now = datetime.datetime.now()
+        now = ny_now()
         h12 = now.hour % 12 or 12
         stamp = now.strftime("%b %d, %Y at ") + f"{h12}:{now:%M} {now:%p}"
         return punch_clock(timestamp=stamp, lat=lat, lng=lng,

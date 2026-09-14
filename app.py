@@ -15,6 +15,7 @@ from streamlit_geolocation import streamlit_geolocation
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
+from src.nytime import ny_now, ny_today
 from src.sb_auth import (authed_client, current_user, persist_session_cookie,
                          restore_session, sign_out, sign_up_or_in)
 from src.payslip import generate_payslip
@@ -107,7 +108,7 @@ def pay_period(d: date):
 
 
 def period_options():
-    today = date.today()
+    today = ny_today()
     cur = pay_period(today)
     prev_end = cur[0].toordinal() - 1
     prev_end_d = date.fromordinal(prev_end)
@@ -123,17 +124,9 @@ def period_options():
     }
 
 
-def gps_kwargs():
-    loc = streamlit_geolocation()
-    if loc and loc.get("latitude") and loc.get("longitude"):
-        return {"lat": loc["latitude"], "lng": loc["longitude"],
-                "accuracy": loc.get("accuracy")}
-    return {}
-
-
 def store_punch(kind: str, **kw):
-    now = datetime.now().strftime("%H:%M")
-    today = date.today().isoformat()
+    now = ny_now().strftime("%H:%M")
+    today = ny_today().isoformat()
     kw.setdefault("source", "button")
     if kind == "in":
         store.add_punch(today, now, None, **kw)
@@ -238,26 +231,35 @@ if page == "⏱ Clock":
     else:
         pill = '<span class="status-pill off">⚪ Not clocked in</span>'
     st.markdown(f'<div class="hero"><h1>⏱️ ShiftSnap</h1>'
-                f"<p>{worker_name} · {date.today().strftime('%A, %b %-d')}</p>"
+                f"<p>{worker_name} · {ny_today().strftime('%A, %b %-d')}</p>"
                 f"{pill}</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="card"><h3>📍 Clock in / out</h3>',
                 unsafe_allow_html=True)
-    st.caption("Your location is captured automatically with each punch.")
+    loc = streamlit_geolocation()
+    gps = {}
+    if loc and loc.get("latitude") and loc.get("longitude"):
+        gps = {"lat": loc["latitude"], "lng": loc["longitude"],
+               "accuracy": loc.get("accuracy")}
+        st.caption(f"📍 Location ready — {loc['latitude']:.4f}, "
+                   f"{loc['longitude']:.4f} will be stamped on your punch.")
+    else:
+        st.caption("📍 Location not available — punches save without GPS. "
+                   "Allow location access in your browser to stamp punches.")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🟢 Clock In", type="primary",
                      disabled=bool(open_shift)):
-            store_punch("in", **gps_kwargs())
+            store_punch("in", **gps)
             st.rerun()
     with c2:
         if st.button("🔴 Clock Out", disabled=not bool(open_shift)):
-            store_punch("out", **gps_kwargs())
+            store_punch("out", **gps)
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
     # today at a glance
-    today = date.today().isoformat()
+    today = ny_today().isoformat()
     todays = store.list_shifts(today, today)
     # Supabase store returns a date-keyed dict; local store returns a list.
     todays = todays.get(today, []) if isinstance(todays, dict) else todays
@@ -267,7 +269,7 @@ if page == "⏱ Clock":
     st.markdown(f'<div class="stat"><div class="v">{fmt_duration(mins)}</div>'
                 '<div class="l">Today</div></div>', unsafe_allow_html=True)
     st.markdown(f'<div class="stat"><div class="v">{len(todays)}</div>'
-                '<div class="l">Punches</div></div>', unsafe_allow_html=True)
+                '<div class="l">Shifts</div></div>', unsafe_allow_html=True)
     st.markdown(f'<div class="stat"><div class="v green">'
                 f'{"$" + f"{pay:,.2f}" if pay is not None else "—"}</div>'
                 '<div class="l">Est. pay</div></div>', unsafe_allow_html=True)
@@ -285,14 +287,14 @@ elif page == "📅 Timesheet":
     if rng is None:
         c1, c2 = st.columns(2)
         with c1:
-            s = st.date_input("Start", value=pay_period(date.today())[0])
+            s = st.date_input("Start", value=pay_period(ny_today())[0])
         with c2:
-            e = st.date_input("End", value=date.today())
+            e = st.date_input("End", value=ny_today())
         rng = (s, e)
     start, end = rng[0].isoformat(), rng[1].isoformat()
 
     summ = store.summary(start, end)
-    pay = round(summ["total_decimal"] * (hourly_rate or 0), 2)
+    pay = round(summ["total_minutes"] / 60 * (hourly_rate or 0), 2)
     st.markdown('<div class="stat-row">', unsafe_allow_html=True)
     st.markdown(f'<div class="stat"><div class="v">{summ["total_hours"]}</div>'
                 '<div class="l">Hours</div></div>', unsafe_allow_html=True)
@@ -398,14 +400,28 @@ elif page == "📸 Import Photo":
                     keep = st.checkbox("Keep", value=True, key=f"pk{i}")
                 p["_date"], p["_time"], p["_keep"] = d, t, keep
             if st.button("💾 Save to timesheet", type="primary"):
+                kept = [p for p in stamps if p.get("_keep", True)]
+                kept.sort(key=lambda p: (p["_date"].isoformat(),
+                                         p["_time"].strftime("%H:%M")))
+                # Pair consecutive timestamps into clock-in/out shifts so an
+                # imported photo yields complete shifts, not open rows.
                 saved = 0
-                for p in stamps:
-                    if p.get("_keep", True):
-                        store.add_punch(p["_date"].isoformat(),
-                                        p["_time"].strftime("%H:%M"), None,
-                                        source="photo")
-                        saved += 1
-                st.success(f"Saved {saved} punch(es). Review pairs in Timesheet.")
+                i = 0
+                while i < len(kept):
+                    p = kept[i]
+                    d = p["_date"].isoformat()
+                    t_in = p["_time"].strftime("%H:%M")
+                    t_out = None
+                    if (i + 1 < len(kept)
+                            and kept[i + 1]["_date"].isoformat() == d
+                            and kept[i + 1]["_time"].strftime("%H:%M") > t_in):
+                        t_out = kept[i + 1]["_time"].strftime("%H:%M")
+                        i += 2
+                    else:
+                        i += 1
+                    store.add_punch(d, t_in, t_out, source="photo")
+                    saved += 1
+                st.success(f"Saved {saved} shift(s). Review pairs in Timesheet.")
                 st.session_state.pop("photo_stamps", None)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -479,10 +495,10 @@ elif page == "🛠 Team":
     if rng is None:
         c1, c2 = st.columns(2)
         with c1:
-            s = st.date_input("Start", value=pay_period(date.today())[0],
+            s = st.date_input("Start", value=pay_period(ny_today())[0],
                               key="ts")
         with c2:
-            e = st.date_input("End", value=date.today(), key="te")
+            e = st.date_input("End", value=ny_today(), key="te")
         rng = (s, e)
     start, end = rng[0].isoformat(), rng[1].isoformat()
 
@@ -491,7 +507,7 @@ elif page == "🛠 Team":
         rows = []
         for t in team:
             rate = t.get("hourly_rate") or 0
-            pay = round(t["total_decimal"] * rate, 2)
+            pay = round(t["total_minutes"] / 60 * rate, 2)
             rows.append({"Worker": t["worker"], "Days": t["days_worked"],
                          "Hours": t["total_hours"], "Rate": f"${rate}/h",
                          "Est. pay": f"${pay:,.2f}",

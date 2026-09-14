@@ -307,6 +307,7 @@ class SupabaseShiftStore(ShiftStore):
             "open_shifts": open_count,
             "total_hours": fmt_duration(total_min),
             "total_decimal": round(total_min / 60, 2),
+            "total_minutes": total_min,
             "approved_hours": fmt_duration(approved_min),
             "extra_hours": fmt_duration(total_min - approved_min),
         }

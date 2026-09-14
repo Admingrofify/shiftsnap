@@ -12,6 +12,8 @@ import re
 
 import requests
 
+from .nytime import ny_today
+
 OCR_URL = "https://api.ocr.space/parse/image"
 
 
@@ -106,7 +108,7 @@ def parse_photo_timestamp(text: str) -> dict | None:
                     h += 12
                 if ap.upper() == "A" and h == 12:
                     h = 0
-                date = datetime.date.today()
+                date = ny_today()
                 return {"date": date.isoformat(), "time": f"{h:02d}:{int(mm):02d}",
                         "raw": m.group(0).strip()}
         except ValueError:

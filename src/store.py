@@ -10,6 +10,8 @@ Stored as {date_str: [shift, ...]} where date_str is "YYYY-MM-DD".
 from __future__ import annotations
 
 import datetime
+
+from .nytime import ny_today
 import json
 import re
 from pathlib import Path
@@ -51,7 +53,7 @@ def normalize_date(raw: str, today: datetime.date | None = None) -> str:
 
     Accepts 'YYYY-MM-DD', 'MM/DD/YYYY', 'Sep 1', 'Sept 1 2026', 'today', 'yesterday'.
     """
-    today = today or datetime.date.today()
+    today = today or ny_today()
     s = raw.strip().lower()
     if s == "today":
         return today.isoformat()
@@ -277,6 +279,7 @@ class ShiftStore:
             "open_shifts": open_count,
             "total_hours": fmt_duration(total_min),
             "total_decimal": round(total_min / 60, 2),
+            "total_minutes": total_min,
             "approved_hours": fmt_duration(approved_min),
             "extra_hours": fmt_duration(total_min - approved_min),
         }

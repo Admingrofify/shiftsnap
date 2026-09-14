@@ -20,6 +20,17 @@ def _blocks_text(msg: dict) -> str:
     return " ".join(b.get("text", "") for b in msg.get("content", []) if "text" in b)
 
 
+def _current_pay_period() -> tuple[str, str]:
+    """This pay period as ISO dates (1st–15th / 16th–month end), NY time."""
+    import calendar
+    from .nytime import ny_today
+    d = ny_today()
+    if d.day <= 15:
+        return d.replace(day=1).isoformat(), d.replace(day=15).isoformat()
+    last = calendar.monthrange(d.year, d.month)[1]
+    return d.replace(day=16).isoformat(), d.replace(day=last).isoformat()
+
+
 class DemoModel(Model):
     """Rule-based stand-in model for offline demos."""
 
@@ -164,6 +175,18 @@ class DemoModel(Model):
                     {"name": "pay_period_summary",
                      "input": {"start_date": rng[0], "end_date": rng[1]}}]
             return "Which date range should I summarize? e.g. 'Sep 1 to Sep 15'.", []
+
+        # Natural "how many hours did I work …?" phrasing. "Current pay
+        # period" resolves to the 1st–15th / 16th–end range in NY time.
+        if re.search(r"\bhow many hours\b", low) or ("hours" in low and "work" in low):
+            rng = self._parse_range(text)
+            if not rng and "pay period" in low:
+                rng = _current_pay_period()
+            if rng:
+                return "Crunching the numbers for that period.", [
+                    {"name": "pay_period_summary",
+                     "input": {"start_date": rng[0], "end_date": rng[1]}}]
+            return "Which date range should I check? e.g. 'Sep 1 to Sep 15'.", []
 
         if "timesheet" in low or "excel" in low or "generate" in low:
             rng = self._parse_range(text)
