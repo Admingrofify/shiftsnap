@@ -37,7 +37,7 @@ def load_profile() -> dict:
 
 
 def _write_sheet(ws, worker_name: str, shifts: dict, start: str, end: str,
-                 profile: dict) -> None:
+                 profile: dict, hourly_rate=None) -> None:
     """Fill one worksheet with a worker's timesheet. Shared by solo & team exports."""
     ws.title = worker_name[:31]
     ws.sheet_properties.pageSetUpPr.fitToPage = True
@@ -50,8 +50,9 @@ def _write_sheet(ws, worker_name: str, shifts: dict, start: str, end: str,
     ws.row_dimensions[1].height = 28
 
     ws.merge_cells("A2:J2")
+    rate = hourly_rate if hourly_rate is not None else profile.get("hourly_rate", "")
     meta = (f"Classification: {profile.get('classification', '')}   |   "
-            f"Hourly rate: ${profile.get('hourly_rate', '')}/hr   |   "
+            f"Hourly rate: ${rate}/hr   |   "
             f"Project: {profile.get('project_code', '')}   |   "
             f"Location: {profile.get('location', '')}")
     ws["A2"] = meta
@@ -110,14 +111,16 @@ def _write_sheet(ws, worker_name: str, shifts: dict, start: str, end: str,
         cell.fill = PatternFill("solid", fgColor="D9E8EC")
     ws.row_dimensions[row].height = 22
 
-    rate = profile.get("hourly_rate") or 0
+    rate = hourly_rate if hourly_rate is not None else (profile.get("hourly_rate") or 0)
     est = round(total_min / 60 * rate, 2)
     ws.merge_cells(f"A{row + 2}:J{row + 2}")
     ws[f"A{row + 2}"] = f"Estimated gross pay: ${est:,.2f}  ({round(total_min / 60, 2)}h × ${rate}/h)"
     ws[f"A{row + 2}"].font = Font(bold=True, size=11)
 
 
-def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) -> str:
+def generate_timesheet(start: str, end: str, store: ShiftStore | None = None,
+                     worker_name: str | None = None,
+                     hourly_rate=None) -> str:
     """Generate the timesheet Excel for start..end (YYYY-MM-DD). Returns file path."""
     start = normalize_date(start)
     end = normalize_date(end)
@@ -126,8 +129,8 @@ def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) ->
     shifts = store.list_shifts(start, end)
 
     wb = openpyxl.Workbook()
-    _write_sheet(wb.active, profile.get("name", "Timesheet"), shifts,
-                 start, end, profile)
+    _write_sheet(wb.active, worker_name or profile.get("name", "Timesheet"),
+                 shifts, start, end, profile, hourly_rate)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fname = f"Timesheet_{start}_to_{end}.xlsx"
@@ -146,7 +149,8 @@ def generate_team_timesheet(start: str, end: str, store) -> str:
     ws = wb.active
     ws.title = "Team Summary"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    headers = ["Worker", "Days", "Total Hours", "Approved (8h/d)", "Extra Hours"]
+    headers = ["Worker", "Days", "Total Hours", "Rate ($/h)", "Est. Pay ($)",
+               "Approved (8h/d)", "Extra Hours"]
     for col, h in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col, value=h)
         cell.font = HEADER_FONT
@@ -155,20 +159,24 @@ def generate_team_timesheet(start: str, end: str, store) -> str:
         cell.border = BORDER
     summaries = store.team_summary(start, end)
     for r, s in enumerate(summaries, start=2):
+        rate = s.get("hourly_rate") or 0
+        hours = s["total_decimal"]
+        pay = round(hours * rate, 2)
         for col, v in enumerate(
-                [s["worker"], s["days_worked"], s["total_hours"],
+                [s["worker"], s["days_worked"], s["total_hours"], rate, pay,
                  s["approved_hours"], s["extra_hours"]], start=1):
             cell = ws.cell(row=r, column=col, value=v)
             cell.border = BORDER
             cell.alignment = CENTER
-    for i, w in enumerate([18, 10, 14, 14, 14], start=1):
+    for i, w in enumerate([18, 10, 14, 12, 14, 14, 14], start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
 
     for s in summaries:
         worker = next(w for w in store.list_workers()
                       if w["name"] == s["worker"])
         shifts = store.list_shifts(start, end, employee_id=worker["id"])
-        _write_sheet(wb.create_sheet(), s["worker"], shifts, start, end, profile)
+        _write_sheet(wb.create_sheet(), s["worker"], shifts, start, end,
+                     profile, s.get("hourly_rate"))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fname = f"Team_Timesheet_{start}_to_{end}.xlsx"

@@ -19,8 +19,11 @@ create table if not exists workers (
   id uuid primary key references auth.users(id) on delete cascade,
   name text not null,
   email text,
+  hourly_rate numeric,                 -- per-worker pay rate ($/hr), set in Profile
   created_at timestamptz default now()
 );
+-- for projects created before this column existed:
+alter table workers add column if not exists hourly_rate numeric;
 
 create table if not exists shifts (
   id uuid primary key default gen_random_uuid(),

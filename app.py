@@ -1,19 +1,15 @@
-"""ShiftSnap v2 — Snap. Log. Get paid. Now multi-worker on Supabase.
+"""ShiftSnap v2 — multi-worker timesheets.
 
-Worker flow: pick your name -> Clock In/Out buttons (GPS) or snap a
-timestamp photo -> agent logs it -> pay-period dashboard -> Excel export.
-
-Admin flow: sidebar PIN -> team table, per-worker drill-down, team Excel.
-
-Without SUPABASE_URL/SUPABASE_KEY env vars the app runs in single-worker
-demo mode on a local JSON store.
+Free login via Supabase Auth (email magic link). GPS-stamped Clock In/Out,
+weekly photo import, per-worker pay rates, Excel exports with pay, and an
+admin team view — all scoped by Row Level Security.
 """
-from __future__ import annotations
-
-import datetime
+import calendar
 import os
+from datetime import date, datetime
 
 import streamlit as st
+from streamlit_geolocation import streamlit_geolocation
 
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
@@ -23,74 +19,131 @@ from src.sb_auth import (authed_client, consume_callback, current_user,
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
 
-st.set_page_config(page_title="ShiftSnap", page_icon="⏱️", layout="centered")
-
-CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: #FAF7F2; }
-.hero {
-  background: linear-gradient(135deg, #0F766E 0%, #134E4A 60%, #1E293B 100%);
-  border-radius: 20px; padding: 28px 24px; color: white; margin-bottom: 18px;
-  box-shadow: 0 10px 30px rgba(15,118,110,.25);
-}
-.hero h1 { font-size: 1.7rem; font-weight: 800; margin: 0 0 6px 0; }
-.hero p { opacity: .85; margin: 0; font-size: .95rem; }
-.card { background: white; border-radius: 16px; padding: 18px;
-        box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 14px; }
-.card h3 { margin: 0 0 10px 0; font-size: 1.02rem; }
-.stat { background: white; border-radius: 14px; padding: 14px 10px; text-align: center;
-        box-shadow: 0 2px 12px rgba(0,0,0,.06); }
-.stat .v { font-size: 1.35rem; font-weight: 800; color: #0F766E; }
-.stat .l { font-size: .72rem; color: #64748B; text-transform: uppercase; letter-spacing: .04em; }
-.punch { border-left: 4px solid #0F766E; background: white; border-radius: 12px;
-         padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.05); }
-.punch.open { border-left-color: #F59E0B; }
-.badge { display: inline-block; font-size: .72rem; font-weight: 700; border-radius: 999px;
-         padding: 2px 10px; }
-.badge.done { background: #D1FAE5; color: #065F46; }
-.badge.open { background: #FEF3C7; color: #92400E; }
-.badge.src { background: #E0F2F1; color: #0F766E; }
-.stButton>button { border-radius: 12px; font-weight: 700; }
-div[data-testid="stChatInput"] { border-radius: 14px; }
-.worker-chip { background: #0F766E; color: white; border-radius: 999px;
-               padding: 4px 14px; font-weight: 700; font-size: .85rem; }
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
-
 SB = supabase_configured()
 
+st.set_page_config(page_title="ShiftSnap", page_icon="⏱️", layout="centered")
 
-def get_gps() -> dict | None:
-    """Browser GPS via streamlit-geolocation; None when unavailable/denied."""
-    try:
-        from streamlit_geolocation import streamlit_geolocation
-        loc = streamlit_geolocation()
-    except Exception:
-        return None
-    if not loc:
-        return None
-    lat, lng = loc.get("latitude") or 0, loc.get("longitude") or 0
-    if not lat and not lng:
-        return None
-    return {"lat": lat, "lng": lng, "acc": loc.get("accuracy") or 0}
+# ------------------------------------------------------------------ styling
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', system-ui, sans-serif; }
+.stApp { background: #f4f6fb; }
+.block-container { padding-top: 1.2rem; max-width: 720px; }
+
+.hero {
+  background: linear-gradient(120deg, #0b1f3a 0%, #123a63 55%, #0e7c6b 130%);
+  border-radius: 22px; padding: 30px 26px; color: #fff;
+  box-shadow: 0 12px 32px rgba(11,31,58,.25); margin-bottom: 18px;
+}
+.hero h1 { font-size: 30px; font-weight: 800; margin: 0 0 4px; letter-spacing: -.5px; }
+.hero p { margin: 0; opacity: .85; font-size: 14px; }
+.hero .status-pill {
+  display: inline-block; margin-top: 12px; padding: 6px 14px; border-radius: 999px;
+  font-size: 13px; font-weight: 600; background: rgba(255,255,255,.16);
+  backdrop-filter: blur(4px);
+}
+.hero .status-pill.on { background: #22c55e; color: #06281c; }
+.hero .status-pill.off { background: rgba(255,255,255,.16); }
+
+.card {
+  background: #fff; border-radius: 18px; padding: 20px;
+  box-shadow: 0 4px 18px rgba(15,30,60,.07); margin-bottom: 14px;
+  border: 1px solid #e8edf5;
+}
+.card h3 { margin: 0 0 10px; font-size: 16px; font-weight: 700; color: #0b1f3a; }
+
+.stat-row { display: flex; gap: 10px; }
+.stat {
+  flex: 1; background: #fff; border-radius: 16px; padding: 14px 12px;
+  border: 1px solid #e8edf5; text-align: center;
+  box-shadow: 0 4px 14px rgba(15,30,60,.05);
+}
+.stat .v { font-size: 22px; font-weight: 800; color: #0b1f3a; }
+.stat .l { font-size: 11px; color: #6b7a90; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+.stat .v.green { color: #0e7c6b; }
+
+div.stButton > button[kind="primary"] {
+  background: linear-gradient(120deg, #0e7c6b, #12a48f);
+  border: none; border-radius: 14px; font-weight: 700; font-size: 16px;
+  padding: 14px; box-shadow: 0 8px 20px rgba(14,124,107,.35);
+}
+div.stButton > button:not([kind="primary"]) {
+  border-radius: 14px; font-weight: 600; border: 1.5px solid #dbe3f0;
+}
+div.stButton > button { width: 100%; }
+
+section[data-testid="stSidebar"] { background: #0b1f3a; }
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] p { color: #dbe6f5 !important; }
+section[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label {
+  background: rgba(255,255,255,.06); border-radius: 12px; padding: 10px 14px;
+  margin-bottom: 6px; font-weight: 600;
+}
+.avatar {
+  width: 44px; height: 44px; border-radius: 50%;
+  background: linear-gradient(135deg, #0e7c6b, #34d399);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 800; font-size: 18px;
+}
+.profile-head { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+.small { font-size: 12px; color: #6b7a90; }
+table { font-size: 13px; }
+</style>
+""", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ helpers
+def pay_period(d: date):
+    if d.day <= 15:
+        return date(d.year, d.month, 1), date(d.year, d.month, 15)
+    last = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, 16), date(d.year, d.month, last)
 
 
-# ---------------------------------------------------------------- auth gate
-# Free login: email magic link via Supabase Auth (no password, no cost).
-# The worker's JWT scopes every query through Row Level Security.
-def auth_gate():
-    # Returning from the email link? ?token_hash=...&type=magiclink
-    if st.query_params.get("token_hash") and not current_user():
-        try:
-            consume_callback()
-            st.rerun()
-        except Exception as exc:
-            st.error(f"That login link didn't work ({exc}). Request a new one below.")
-    if current_user():
-        return
+def period_options():
+    today = date.today()
+    cur = pay_period(today)
+    prev_end = cur[0].toordinal() - 1
+    prev_end_d = date.fromordinal(prev_end)
+    prev = pay_period(prev_end_d)
+    first = date(today.year, today.month, 1)
+    last = calendar.monthrange(today.year, today.month)[1]
+    return {
+        f"Current pay period ({cur[0].strftime('%b %-d')}–{cur[1].strftime('%b %-d')})": cur,
+        f"Previous pay period ({prev[0].strftime('%b %-d')}–{prev[1].strftime('%b %-d')})": prev,
+        f"This month ({first.strftime('%b %-d')}–{date(today.year, today.month, last).strftime('%b %-d')})":
+            (first, date(today.year, today.month, last)),
+        "Custom…": None,
+    }
+
+
+def gps_kwargs():
+    loc = streamlit_geolocation()
+    if loc and loc.get("latitude") and loc.get("longitude"):
+        return {"lat": loc["latitude"], "lng": loc["longitude"],
+                "accuracy": loc.get("accuracy")}
+    return {}
+
+
+def store_punch(kind: str, **kw):
+    now = datetime.now().strftime("%H:%M")
+    today = date.today().isoformat()
+    kw.setdefault("source", "button")
+    if kind == "in":
+        store.add_punch(today, now, None, **kw)
+    else:
+        open_shifts = [s for s in store.list_shifts(today, today)
+                       if not s.get("time_out")]
+        if open_shifts:
+            s = open_shifts[-1]
+            store.update_punch(today, s["time_in"], time_out=now, **kw)
+        else:
+            store.add_punch(today, None, now, **kw)
+
+
+# ------------------------------------------------------------------ auth
+def login_screen():
     st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
                 "<p>Snap a timestamp. Log the shift. Get paid.</p></div>",
                 unsafe_allow_html=True)
@@ -98,307 +151,324 @@ def auth_gate():
                 unsafe_allow_html=True)
     st.caption("Enter your work email and we'll send you a one-tap login link.")
     email = st.text_input("Work email", placeholder="you@company.com")
-    if st.button("📧 Send me a login link", type="primary",
-                 use_container_width=True, disabled=not email.strip()):
+    if st.button("Send me a login link", type="primary",
+                 disabled=not email.strip()):
         try:
             send_magic_link(email)
-            st.success(f"Login link sent to {email.strip()} — check your inbox "
-                       "(and spam). It expires in an hour.")
+            st.success(f"Login link sent to {email.strip()} — check your inbox. "
+                       "It expires in an hour.")
         except Exception as exc:
             st.error(f"Couldn't send the link: {exc}")
     st.markdown("</div>", unsafe_allow_html=True)
-    st.caption("Your email only identifies your timesheet — nothing else. "
-               "Supabase free tier; no personal data is sold or shared.")
+    st.caption("Your email only identifies your timesheet. Free tier — "
+               "nothing is sold or shared.")
 
 
 if SB:
-    auth_gate()  # stops here until logged in
+    if st.query_params.get("token_hash") and not current_user():
+        try:
+            consume_callback()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"That login link didn't work ({exc}). Request a new one.")
+    if not current_user():
+        login_screen()
+        st.stop()
+
     user = current_user()
     client = authed_client()
     if not client:
         sign_out()
         st.rerun()
-    store = get_store()  # placeholder, replaced below with authed client
     from src.sb_store import SupabaseShiftStore
     store = SupabaseShiftStore(employee_id=user["id"], client=client)
+
     if "worker" not in st.session_state:
-        # First login: pick a display name for the timesheet.
         st.markdown('<div class="hero"><h1>⏱️ ShiftSnap</h1>'
                     "<p>One last step.</p></div>", unsafe_allow_html=True)
         st.markdown('<div class="card"><h3>👋 What should we call you?</h3>',
                     unsafe_allow_html=True)
-        dname = st.text_input("Display name",
-                              placeholder="e.g. Jordan Lee",
+        dname = st.text_input("Display name", placeholder="e.g. Jordan Lee",
                               value=user["email"].split("@")[0])
-        if st.button("Start →", type="primary", use_container_width=True,
-                     disabled=not dname.strip()):
+        if st.button("Start →", type="primary", disabled=not dname.strip()):
             st.session_state.worker = store.ensure_worker(dname.strip(),
                                                            user["email"])
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         st.stop()
     worker = st.session_state.worker
-    worker_label = worker["name"]
     is_admin = store.is_admin()
+    hourly_rate = worker.get("hourly_rate")
 else:
-    store = get_store()  # JSON demo mode
-    worker = None
-    worker_label = "Jordan Lee (demo)"
+    store = get_store()
+    worker = {"id": None, "name": "Jordan Lee (demo)", "email": ""}
+    user = {"email": "demo"}
     is_admin = False
+    hourly_rate = None
 
+worker_name = worker["name"]
 
-def _agent():
-    key = f"agent_{worker_label}"
-    if key not in st.session_state:
-        wid = worker["id"] if SB and worker else None
-        st.session_state[key] = build_agent(worker_id=wid)
-    return st.session_state[key]
-
-
-def ask_agent(text: str) -> str:
-    try:
-        return str(_agent()(text)).strip()
-    except Exception as exc:
-        return f"Something went wrong: {exc}"
-
-
-def store_punch(p, source="photo"):
-    kw = {"comment": f"{source} {p['raw']}", "source": source}
-    if SB and worker:
-        kw["employee_id"] = worker["id"]
-    store.punch(p["date"], p["time"], **kw)
-
-
-# ------------------------------------------------------------------ pay period
-today = datetime.date.today()
-if today.day <= 15:
-    d_start, d_end = today.replace(day=1), today.replace(day=15)
-else:
-    d_start, d_end = today.replace(day=16), today
-
+# ------------------------------------------------------------------ sidebar
 with st.sidebar:
-    st.markdown("### 📅 Pay period")
-    p_start = st.date_input("Start", d_start)
-    p_end = st.date_input("End", d_end)
-    if SB:
-        st.markdown("---")
-        st.markdown(f"👤 **{worker_label}**")
-        st.caption(user["email"])
-        if st.button("🚪 Logout", use_container_width=True):
-            sign_out()
-            st.rerun()
-        st.session_state.is_admin = is_admin
+    st.markdown(f"""
+    <div class="profile-head">
+      <div class="avatar">{worker_name[:1].upper()}</div>
+      <div><div style="font-weight:700;color:#fff;">{worker_name}</div>
+      <div class="small" style="color:#8fa3c2;">{user.get('email', '')}</div></div>
+    </div>""", unsafe_allow_html=True)
+    pages = ["⏱ Clock", "📅 Timesheet", "📸 Import Photo", "💬 Ask", "👤 Profile"]
+    if is_admin:
+        pages.append("🛠 Team")
+    page = st.radio("Navigate", pages, label_visibility="collapsed")
+    st.markdown("---")
+    if SB and st.button("🚪 Logout"):
+        sign_out()
+        st.rerun()
 
-S, E = p_start.isoformat(), p_end.isoformat()
+# ------------------------------------------------------------------ CLOCK
+if page == "⏱ Clock":
+    open_shift = store.open_shift()
+    if open_shift:
+        pill = (f'<span class="status-pill on">🟢 Clocked in since '
+                f'{open_shift["time_in"]}</span>')
+    else:
+        pill = '<span class="status-pill off">⚪ Not clocked in</span>'
+    st.markdown(f'<div class="hero"><h1>⏱️ ShiftSnap</h1>'
+                f"<p>{worker_name} · {date.today().strftime('%A, %b %-d')}</p>"
+                f"{pill}</div>", unsafe_allow_html=True)
 
-# ------------------------------------------------------------------ admin view
-if SB and st.session_state.get("is_admin"):
-    st.markdown('<div class="hero"><h1>🛡️ Team overview</h1>'
-                "<p>Everyone's hours for the pay period.</p></div>",
+    st.markdown('<div class="card"><h3>📍 Clock in / out</h3>',
                 unsafe_allow_html=True)
-    team = store.team_summary(S, E)
-    if team:
-        st.dataframe(
-            [{"Worker": t["worker"], "Days": t["days_worked"],
-              "Total": t["total_hours"], "Approved": t["approved_hours"],
-              "Extra": t["extra_hours"],
-              "⚠️ open": t["open_shifts"]} for t in team],
-            use_container_width=True, hide_index=True)
-        if st.button("📥 Download team Excel", type="primary"):
-            path = generate_team_timesheet(S, E, store)
-            with open(path, "rb") as f:
-                st.download_button(
-                    "Save Team_Timesheet.xlsx", f,
-                    file_name=path.split("/")[-1],
-                    mime="application/vnd.openxmlformats-officedocument."
-                         "spreadsheetml.sheet")
-    else:
-        st.info("No shifts logged in this period yet.")
-    st.stop()
-
-# ------------------------------------------------------------------ worker UI
-summary = store.summary(S, E)
-open_now = store.open_shifts()
-
-st.markdown(
-    f'<div class="hero"><h1>⏱️ ShiftSnap</h1>'
-    f"<p><span class='worker-chip'>{worker_label}</span></p>"
-    f"<p style='margin-top:8px'>Snap a timestamp. Log the shift. Get paid.</p></div>",
-    unsafe_allow_html=True)
-
-# Clock in / out buttons -------------------------------------------------------
-st.markdown('<div class="card"><h3>📍 Clock in / out</h3>', unsafe_allow_html=True)
-gps = get_gps()
-gps_note = ("🛰️ GPS attached" if gps else
-            "📵 no GPS — allow location for site verification")
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("🟢 Clock In", use_container_width=True, type="primary"):
-        tail = (f" lat={gps['lat']} lng={gps['lng']} acc={gps['acc']}"
-                if gps else "")
-        st.session_state.flash = ask_agent(f"Clock me in{tail}")
-        st.rerun()
-with c2:
-    if st.button("🔴 Clock Out", use_container_width=True):
-        tail = (f" lat={gps['lat']} lng={gps['lng']} acc={gps['acc']}"
-                if gps else "")
-        st.session_state.flash = ask_agent(f"Clock me out{tail}")
-        st.rerun()
-st.caption(gps_note)
-if st.session_state.get("flash"):
-    st.success(st.session_state.pop("flash"))
-st.markdown("</div>", unsafe_allow_html=True)
-
-if open_now:
-    o = open_now[0]
-    st.warning(f"⏳ You're clocked in since {o['date']} {o['time_in']} — "
-               "don't forget to clock out!")
-
-# Stat tiles -------------------------------------------------------------------
-a, b, c, d = st.columns(4)
-for col, v, l in ((a, summary["total_hours"], "Total"),
-                  (b, summary["approved_hours"], "Approved"),
-                  (c, summary["extra_hours"], "Extra"),
-                  (d, str(summary["days_worked"]), "Days")):
-    col.markdown(f'<div class="stat"><div class="v">{v}</div>'
-                 f'<div class="l">{l}</div></div>', unsafe_allow_html=True)
-st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-# Photo snap -------------------------------------------------------------------
-st.markdown('<div class="card"><h3>📸 Snap a timestamp photo</h3>',
-            unsafe_allow_html=True)
-photo = st.file_uploader("Upload a clock-in/out timestamp photo",
-                         type=["jpg", "jpeg", "png", "webp"], key="snap")
-if photo and not st.session_state.get(f"snapped_{photo.name}"):
-    with st.spinner("Reading timestamp…"):
-        parsed = parse_photo_timestamp(extract_text(photo.getvalue()))
-    if parsed:
-        st.session_state.pending_punch = parsed
-    else:
-        st.error("Couldn't read a timestamp — try a clearer shot of the time overlay.")
-    st.session_state[f"snapped_{photo.name}"] = True
-
-pp = st.session_state.get("pending_punch")
-if pp:
-    action = "CLOCK OUT" if open_now else "CLOCK IN"
-    st.info(f"🕒 Found **{pp['date']} {pp['time']}** → this will **{action}**.")
-    cc1, cc2 = st.columns(2)
-    with cc1:
-        if st.button(f"✅ Confirm {action}", type="primary",
-                     use_container_width=True):
-            store_punch(pp)
-            st.session_state.pop("pending_punch")
-            st.success(f"{action.title()} confirmed: {pp['date']} {pp['time']}.")
+    st.caption("Your location is captured automatically with each punch.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🟢 Clock In", type="primary",
+                     disabled=bool(open_shift)):
+            store_punch("in", **gps_kwargs())
             st.rerun()
-    with cc2:
-        if st.button("🔁 Retake", use_container_width=True):
-            st.session_state.pop("pending_punch")
+    with c2:
+        if st.button("🔴 Clock Out", disabled=not bool(open_shift)):
+            store_punch("out", **gps_kwargs())
             st.rerun()
-st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# Weekly import ----------------------------------------------------------------
-st.markdown('<div class="card"><h3>🧾 Import weekly timesheet photo</h3>',
-            unsafe_allow_html=True)
-imp = st.file_uploader("Upload a photo of a weekly timesheet",
-                       type=["jpg", "jpeg", "png", "webp"], key="import")
-if imp and not st.session_state.get(f"imported_{imp.name}"):
-    with st.spinner("Scanning for timestamps…"):
-        st.session_state.import_found = find_all_timestamps(
-            extract_text(imp.getvalue()))
-    st.session_state[f"imported_{imp.name}"] = True
+    # today at a glance
+    today = date.today().isoformat()
+    todays = store.list_shifts(today, today)
+    mins = sum(net_minutes(s) for s in todays if s.get("time_out"))
+    pay = round(mins / 60 * (hourly_rate or 0), 2) if hourly_rate else None
+    st.markdown('<div class="stat-row">', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v">{fmt_duration(mins)}</div>'
+                '<div class="l">Today</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v">{len(todays)}</div>'
+                '<div class="l">Punches</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v green">'
+                f'{"$" + f"{pay:,.2f}" if pay is not None else "—"}</div>'
+                '<div class="l">Est. pay</div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    if not hourly_rate and SB:
+        st.caption("💡 Set your hourly pay in 👤 Profile to see earnings.")
 
-found = st.session_state.get("import_found")
-if found:
-    st.write(f"Found **{len(found)}** timestamps — uncheck any to skip:")
-    picks = [st.checkbox(f"{p['date']}  {p['time']}", value=True, key=f"imp_{i}")
-             for i, p in enumerate(found)]
-    chosen = [p for p, on in zip(found, picks) if on]
-    if st.button(f"✅ Log {len(chosen)} punches", type="primary",
-                 disabled=not chosen):
-        n = 0
-        for p in chosen:
-            try:
-                store_punch(p)
-                n += 1
-            except Exception:
-                pass
-        st.session_state.pop("import_found")
-        st.success(f"Logged {n} punch(es).")
-        st.rerun()
-elif imp:
-    st.warning("No readable timestamps in that photo.")
-st.markdown("</div>", unsafe_allow_html=True)
+# ------------------------------------------------------------------ TIMESHEET
+elif page == "📅 Timesheet":
+    st.markdown(f'<div class="hero"><h1>📅 Timesheet</h1>'
+                f"<p>{worker_name}</p></div>", unsafe_allow_html=True)
+    opts = period_options()
+    choice = st.selectbox("Period", list(opts.keys()))
+    rng = opts[choice]
+    if rng is None:
+        c1, c2 = st.columns(2)
+        with c1:
+            s = st.date_input("Start", value=pay_period(date.today())[0])
+        with c2:
+            e = st.date_input("End", value=date.today())
+        rng = (s, e)
+    start, end = rng[0].isoformat(), rng[1].isoformat()
 
-# Chat -------------------------------------------------------------------------
-st.markdown('<div class="card"><h3>💬 Tell the agent</h3>', unsafe_allow_html=True)
-st.caption('e.g. "Sep 3, 9 AM to 5:30 PM, break 12–12:30 PM" · '
-           '"summarize Sep 1–15" · "make my timesheet"')
-if "chat" not in st.session_state:
-    st.session_state.chat = []
-for m in st.session_state.chat[-12:]:
-    with st.chat_message(m["role"]):
-        st.write(m["text"])
-if prompt := st.chat_input("Log a shift, ask for a summary…"):
-    st.session_state.chat.append({"role": "user", "text": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
-    with st.chat_message("assistant"):
-        with st.spinner("…"):
-            reply = ask_agent(prompt)
-        st.write(reply)
-    st.session_state.chat.append({"role": "assistant", "text": reply})
-    if "timesheet" in prompt.lower() or "excel" in prompt.lower():
-        try:
-            path = generate_timesheet(S, E, store)
-            with open(path, "rb") as f:
-                st.download_button(
-                    "📥 Download Excel timesheet", f,
-                    file_name=path.split("/")[-1],
-                    mime="application/vnd.openxmlformats-officedocument."
-                         "spreadsheetml.sheet")
-        except Exception as exc:
-            st.error(f"Excel failed: {exc}")
-st.markdown("</div>", unsafe_allow_html=True)
+    summ = store.summary(start, end)
+    pay = round(summ["total_decimal"] * (hourly_rate or 0), 2)
+    st.markdown('<div class="stat-row">', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v">{summ["total_hours"]}</div>'
+                '<div class="l">Hours</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v">{summ["days_worked"]}</div>'
+                '<div class="l">Days</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat"><div class="v green">${pay:,.2f}</div>'
+                '<div class="l">Est. pay</div></div>', unsafe_allow_html=True)
+    st.markdown('</div><div style="height:12px"></div>', unsafe_allow_html=True)
 
-# Timeline ---------------------------------------------------------------------
-st.markdown('<div class="card"><h3>🗓️ Shifts</h3>', unsafe_allow_html=True)
-data = store.list_shifts(S, E)
-if not data:
-    st.caption("Nothing logged in this period yet — clock in to start.")
-for date in sorted(data, reverse=True):
-    for s in data[date]:
-        done = bool(s.get("time_out"))
-        badge = ('<span class="badge done">done</span>' if done
-                 else '<span class="badge open">clocked in</span>')
-        src = s.get("source") or "chat"
-        src_badge = f'<span class="badge src">{src}</span>'
-        brk = (f" · break {s['break_start']}–{s['break_end']}"
-               if s.get("break_start") else "")
-        gps_b = " 📍" if s.get("lat") else ""
-        when = (f"{s['time_in']} → {s['time_out']}"
-                if done else f"{s['time_in']} → …")
-        st.markdown(
-            f'<div class="punch{" open" if not done else ""}">'
-            f"<b>{date}</b> · {when}{brk} · "
-            f"<b>{fmt_duration(net_minutes(s))}</b>{gps_b} {badge} {src_badge}"
-            f"</div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
+    rows = []
+    for d, shifts in sorted(store.list_shifts(start, end).items()):
+        for s in shifts:
+            mins = net_minutes(s) if s.get("time_out") else 0
+            rows.append({
+                "Date": d, "In": s.get("time_in") or "—",
+                "Out": s.get("time_out") or "—",
+                "Break": (f"{s['break_start']}–{s['break_end']}"
+                          if s.get("break_start") else "—"),
+                "Hours": fmt_duration(mins),
+                "Pay": f"${mins / 60 * (hourly_rate or 0):,.2f}"
+                       if hourly_rate else "—",
+                "Note": s.get("comment", ""),
+            })
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No shifts in this period yet.")
 
-# Export -----------------------------------------------------------------------
-st.markdown('<div class="card"><h3>📥 Timesheet</h3>', unsafe_allow_html=True)
-if st.button("Generate my Excel timesheet", type="primary",
-             use_container_width=True):
-    try:
-        path = generate_timesheet(S, E, store)
+    st.markdown('<div class="card"><h3>📥 Export Excel</h3>',
+                unsafe_allow_html=True)
+    st.caption("Generates your timesheet workbook with hours and pay.")
+    if st.button("Generate Excel", type="primary"):
+        if SB:
+            path = generate_timesheet(start, end, store, worker_name,
+                                      hourly_rate)
+        else:
+            path = generate_timesheet(start, end, store)
         with open(path, "rb") as f:
-            st.download_button(
-                "📥 Download Excel timesheet", f,
-                file_name=path.split("/")[-1],
-                mime="application/vnd.openxmlformats-officedocument."
-                     "spreadsheetml.sheet")
-        st.success(f"{summary['days_worked']} day(s) · {summary['total_hours']} "
-                   f"total · {summary['approved_hours']} approved · "
-                   f"{summary['extra_hours']} extra")
-    except Exception as exc:
-        st.error(f"Excel failed: {exc}")
-st.markdown("</div>", unsafe_allow_html=True)
+            st.download_button("⬇️ Download timesheet",
+                               data=f.read(),
+                               file_name=os.path.basename(path),
+                               mime="application/vnd.openxmlformats-"
+                                    "officedocument.spreadsheetml.sheet")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ IMPORT
+elif page == "📸 Import Photo":
+    st.markdown('<div class="hero"><h1>📸 Import Photo</h1>'
+                "<p>Weekly timestamp photos → your timesheet.</p></div>",
+                unsafe_allow_html=True)
+    st.markdown('<div class="card"><h3>Upload a timestamp photo</h3>',
+                unsafe_allow_html=True)
+    up = st.file_uploader("Timestamp photo", type=["png", "jpg", "jpeg", "webp"])
+    if up:
+        st.image(up, use_container_width=True)
+        if st.button("🔎 Read timestamps", type="primary"):
+            with st.spinner("Reading photo…"):
+                data = up.getvalue()
+                text = extract_text(data)
+                stamps = find_all_timestamps(text)
+            st.session_state.photo_stamps = stamps
+            st.session_state.photo_bytes = data
+        stamps = st.session_state.get("photo_stamps", [])
+        if stamps:
+            st.success(f"Found {len(stamps)} timestamp(s). Review before saving:")
+            for i, p in enumerate(stamps):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1:
+                    d = st.date_input("Date", value=p["date"].date()
+                                      if hasattr(p["date"], "date") else p["date"],
+                                      key=f"pd{i}")
+                with c2:
+                    t = st.time_input("Time",
+                                      value=datetime.strptime(p["time"], "%H:%M").time()
+                                      if len(p["time"]) == 5
+                                      else datetime.strptime(p["time"], "%H:%M:%S").time(),
+                                      key=f"pt{i}")
+                with c3:
+                    st.write("")
+                    keep = st.checkbox("Keep", value=True, key=f"pk{i}")
+                p["_date"], p["_time"], p["_keep"] = d, t, keep
+            if st.button("💾 Save to timesheet", type="primary"):
+                saved = 0
+                for p in stamps:
+                    if p.get("_keep", True):
+                        store.add_punch(p["_date"].isoformat(),
+                                        p["_time"].strftime("%H:%M"), None,
+                                        source="photo")
+                        saved += 1
+                st.success(f"Saved {saved} punch(es). Review pairs in Timesheet.")
+                st.session_state.pop("photo_stamps", None)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ ASK
+elif page == "💬 Ask":
+    st.markdown('<div class="hero"><h1>💬 Ask ShiftSnap</h1>'
+                "<p>Type naturally — “I worked 9 to 5”, “show my week”.</p></div>",
+                unsafe_allow_html=True)
+
+    def _agent():
+        return build_agent(worker_id=worker["id"] if SB else None)
+
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+    for m in st.session_state.chat:
+        with st.chat_message(m["role"]):
+            st.markdown(m["text"])
+    if prompt := st.chat_input("Log a shift, ask about your hours…"):
+        st.session_state.chat.append({"role": "user", "text": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("…"):
+                try:
+                    reply = _agent().chat(prompt)
+                except Exception as exc:
+                    reply = f"Something went wrong: {exc}"
+            st.markdown(reply)
+        st.session_state.chat.append({"role": "assistant", "text": reply})
+
+# ------------------------------------------------------------------ PROFILE
+elif page == "👤 Profile":
+    st.markdown('<div class="hero"><h1>👤 Profile</h1>'
+                f"<p>{worker_name}</p></div>", unsafe_allow_html=True)
+    st.markdown('<div class="card"><h3>Your details</h3>', unsafe_allow_html=True)
+    st.text_input("Email", value=user.get("email", ""), disabled=True)
+    new_name = st.text_input("Display name", value=worker_name)
+    new_rate = st.number_input("Hourly pay ($/hr)", min_value=0.0, step=0.5,
+                               value=float(hourly_rate or 0.0),
+                               help="Your pay rate — used for pay estimates and Excel exports.")
+    if st.button("💾 Save profile", type="primary"):
+        if SB:
+            st.session_state.worker = store.update_worker_profile(
+                new_name, new_rate or None)
+            st.success("Profile saved.")
+            st.rerun()
+        else:
+            st.info("Demo mode — profile saving needs Supabase.")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="card"><h3>🔒 Privacy</h3>', unsafe_allow_html=True)
+    st.caption("Only your punches, name and pay rate are stored — visible to "
+               "you and your admin. Nothing is sold or shared.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ TEAM (admin)
+elif page == "🛠 Team":
+    if not is_admin:
+        st.error("Admins only.")
+        st.stop()
+    st.markdown('<div class="hero"><h1>🛠 Team</h1>'
+                "<p>Everyone's hours & pay.</p></div>", unsafe_allow_html=True)
+    opts = period_options()
+    choice = st.selectbox("Period", list(opts.keys()), key="team_period")
+    rng = opts[choice]
+    if rng is None:
+        c1, c2 = st.columns(2)
+        with c1:
+            s = st.date_input("Start", value=pay_period(date.today())[0],
+                              key="ts")
+        with c2:
+            e = st.date_input("End", value=date.today(), key="te")
+        rng = (s, e)
+    start, end = rng[0].isoformat(), rng[1].isoformat()
+
+    team = store.team_summary(start, end)
+    if team:
+        rows = []
+        for t in team:
+            rate = t.get("hourly_rate") or 0
+            pay = round(t["total_decimal"] * rate, 2)
+            rows.append({"Worker": t["worker"], "Days": t["days_worked"],
+                         "Hours": t["total_hours"], "Rate": f"${rate}/h",
+                         "Est. pay": f"${pay:,.2f}",
+                         "Extra": t["extra_hours"]})
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        if st.button("📥 Generate team Excel", type="primary"):
+            path = generate_team_timesheet(start, end, store)
+            with open(path, "rb") as f:
+                st.download_button("⬇️ Download team timesheet",
+                                   data=f.read(),
+                                   file_name=os.path.basename(path),
+                                   mime="application/vnd.openxmlformats-"
+                                        "officedocument.spreadsheetml.sheet")
+    else:
+        st.info("No shifts in this period.")

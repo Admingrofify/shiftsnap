@@ -43,7 +43,7 @@ class SupabaseShiftStore(ShiftStore):
 
     # ---- workers ------------------------------------------------------
     def list_workers(self) -> list[dict]:
-        res = (self.client.table("workers").select("id,name")
+        res = (self.client.table("workers").select("id,name,hourly_rate")
                .order("name").execute())
         return res.data or []
 
@@ -62,15 +62,31 @@ class SupabaseShiftStore(ShiftStore):
     def ensure_worker(self, name: str, email: str = "") -> dict:
         """Worker row for the authed user (id = auth.uid(), RLS-scoped)."""
         uid = self._emp(None)
-        res = (self.client.table("workers").select("id,name,email")
+        res = (self.client.table("workers").select("id,name,email,hourly_rate")
                .eq("id", uid).limit(1).execute())
         if res.data:
             return res.data[0]
         name = name.strip() or (email.split("@")[0] if email else "Worker")
         res = (self.client.table("workers")
                .insert({"id": uid, "name": name, "email": email or None})
-               .select("id,name,email").execute())
+               .select("id,name,email,hourly_rate").execute())
         return res.data[0]
+
+    def update_worker_profile(self, name: str | None = None,
+                              hourly_rate: float | None = None) -> dict:
+        """Worker edits their own profile (RLS: only their own row)."""
+        uid = self._emp(None)
+        patch = {}
+        if name is not None and name.strip():
+            patch["name"] = name.strip()
+        if hourly_rate is not None:
+            patch["hourly_rate"] = hourly_rate
+        if patch:
+            (self.client.table("workers").update(patch)
+             .eq("id", uid).execute())
+        res = (self.client.table("workers").select("id,name,email,hourly_rate")
+               .eq("id", uid).limit(1).execute())
+        return res.data[0] if res.data else {}
 
     def is_admin(self, employee_id: str) -> bool:
         res = (self.client.table("admins").select("worker_id")
@@ -234,10 +250,11 @@ class SupabaseShiftStore(ShiftStore):
         }
 
     def team_summary(self, start: str, end: str) -> list[dict]:
-        """Per-worker summaries for the admin view."""
+        """Per-worker summaries for the admin view (includes hourly rate)."""
         out = []
         for w in self.list_workers():
             s = self.summary(start, end, employee_id=w["id"])
             if s["days_worked"]:
-                out.append({"worker": w["name"], **s})
+                out.append({"worker": w["name"],
+                            "hourly_rate": w.get("hourly_rate"), **s})
         return sorted(out, key=lambda r: r["worker"])
