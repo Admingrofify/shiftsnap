@@ -159,13 +159,15 @@ def login_screen():
                        placeholder="Min 6 characters",
                        help="First time here? Pick any password — "
                             "this creates your account.")
-    if st.button("Login / Sign up", type="primary",
-                 disabled=not (email.strip() and pw)):
-        try:
-            sign_up_or_in(email, pw)
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+    if st.button("Login / Sign up", type="primary"):
+        if not email.strip() or not pw:
+            st.error("Enter your work email and a password (min 6 characters).")
+        else:
+            try:
+                sign_up_or_in(email, pw)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
     st.markdown("</div>", unsafe_allow_html=True)
     st.caption("Your email only identifies your timesheet. Free tier — "
                "nothing is sold or shared.")

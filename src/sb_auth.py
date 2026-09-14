@@ -85,14 +85,19 @@ def _save_session(res) -> dict:
 
 
 def restore_session() -> None:
-    """Restore a persisted login from the cookie after a page reload."""
+    """Restore a persisted login from the cookie after a page reload.
+
+    Note: extra-streamlit-components has no ready() API. On a cold load
+    get_all() returns {} until the frontend reports back, which triggers
+    an automatic rerun — then the cookie is picked up.
+    """
     import streamlit as st
     if st.session_state.get("sb_session"):
         return
-    cm = _cookie_manager()
-    if not cm.ready():
-        st.stop()  # wait one round-trip for the cookie jar to load
-    raw = cm.get(COOKIE_NAME)
+    try:
+        raw = _cookie_manager().get_all().get(COOKIE_NAME)
+    except Exception:
+        return
     if not raw:
         return
     try:
