@@ -88,9 +88,12 @@ class SupabaseShiftStore(ShiftStore):
                .eq("id", uid).limit(1).execute())
         return res.data[0] if res.data else {}
 
-    def is_admin(self, employee_id: str) -> bool:
+    def is_admin(self, employee_id: str | None = None) -> bool:
+        emp = employee_id or self.employee_id
+        if not emp:
+            return False
         res = (self.client.table("admins").select("worker_id")
-               .eq("worker_id", employee_id).limit(1).execute())
+               .eq("worker_id", emp).limit(1).execute())
         return bool(res.data)
 
     # ---- internal -----------------------------------------------------

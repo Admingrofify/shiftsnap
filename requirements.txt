@@ -5,3 +5,4 @@ streamlit-geolocation>=0.0.10
 streamlit>=1.30.0
 supabase>=2.0.0
 reportlab
+extra-streamlit-components>=0.1.70

@@ -9,15 +9,21 @@ SMTP setup, free forever.
 Flow:
   1. Worker enters work email + password, taps "Login / Sign up".
   2. First tap creates the account (min 6 chars), later taps sign in.
-  3. The session JWT is stored in st.session_state; authed_client()
-     returns a supabase client carrying it, so every query is scoped by
-     Row Level Security to that worker.
+  3. The session JWT is stored in st.session_state AND in a browser
+     cookie ("shiftsnap_session"), so a page reload keeps the worker
+     logged in. authed_client() returns a supabase client carrying it,
+     so every query is scoped by Row Level Security to that worker.
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timedelta
 
 APP_URL = os.getenv("APP_URL", "https://shiftssnap.com")
+
+COOKIE_NAME = "shiftsnap_session"
+COOKIE_DAYS = 30
 
 
 def _env(key: str, *alts: str) -> str:
@@ -45,6 +51,16 @@ def get_anon_client():
     return create_client(url, key)
 
 
+def _cookie_manager():
+    import streamlit as st
+    cm = st.session_state.get("cookie_manager")
+    if cm is None:
+        from extra_streamlit_components import CookieManager
+        cm = CookieManager()
+        st.session_state.cookie_manager = cm
+    return cm
+
+
 def _save_session(res) -> dict:
     import streamlit as st
     if not res.session or not res.user:
@@ -52,13 +68,39 @@ def _save_session(res) -> dict:
             "No session returned. The Supabase project likely still has "
             "'Confirm email' enabled — turn it off under "
             "Authentication > Settings.")
-    st.session_state.sb_session = {
+    sess = {
         "access_token": res.session.access_token,
         "refresh_token": res.session.refresh_token,
         "user_id": res.user.id,
         "email": res.user.email,
     }
+    st.session_state.sb_session = sess
+    try:  # persist login across page reloads
+        _cookie_manager().set(
+            COOKIE_NAME, json.dumps(sess),
+            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS))
+    except Exception:
+        pass
     return {"id": res.user.id, "email": res.user.email}
+
+
+def restore_session() -> None:
+    """Restore a persisted login from the cookie after a page reload."""
+    import streamlit as st
+    if st.session_state.get("sb_session"):
+        return
+    cm = _cookie_manager()
+    if not cm.ready():
+        st.stop()  # wait one round-trip for the cookie jar to load
+    raw = cm.get(COOKIE_NAME)
+    if not raw:
+        return
+    try:
+        sess = json.loads(raw)
+    except Exception:
+        return
+    if isinstance(sess, dict) and sess.get("refresh_token"):
+        st.session_state.sb_session = sess
 
 
 def sign_up_or_in(email: str, password: str) -> dict:
@@ -115,5 +157,14 @@ def sign_out() -> None:
         if client:
             client.auth.sign_out()
     finally:
+        try:
+            _cookie_manager().delete(COOKIE_NAME)
+        except Exception:
+            try:  # older CookieManager without delete(): expire it instead
+                _cookie_manager().set(
+                    COOKIE_NAME, "",
+                    expires_at=datetime.now() - timedelta(days=1))
+            except Exception:
+                pass
         for k in ("sb_session", "worker", "chat"):
             st.session_state.pop(k, None)

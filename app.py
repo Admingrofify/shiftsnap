@@ -1,8 +1,9 @@
 """ShiftSnap v2 — multi-worker timesheets.
 
-Free login via Supabase Auth (email magic link). GPS-stamped Clock In/Out,
-weekly photo import, per-worker pay rates, Excel exports with pay, and an
-admin team view — all scoped by Row Level Security.
+Free login via Supabase Auth (email + password, no confirmation emails).
+GPS-stamped Clock In/Out, weekly photo import, per-worker pay rates,
+Excel exports with pay, ADP-style payslip PDFs, and an admin team view —
+all scoped by Row Level Security.
 """
 import calendar
 import os
@@ -14,8 +15,8 @@ from streamlit_geolocation import streamlit_geolocation
 from src.agent import build_agent
 from src.backend import get_store, supabase_configured
 from src.ocr import extract_text, find_all_timestamps, parse_photo_timestamp
-from src.sb_auth import (authed_client, current_user, sign_out,
-                         sign_up_or_in)
+from src.sb_auth import (authed_client, current_user, restore_session,
+                         sign_out, sign_up_or_in)
 from src.payslip import generate_payslip
 from src.store import fmt_duration, net_minutes
 from src.timesheet import generate_team_timesheet, generate_timesheet
@@ -23,6 +24,8 @@ from src.timesheet import generate_team_timesheet, generate_timesheet
 SB = supabase_configured()
 
 st.set_page_config(page_title="ShiftSnap", page_icon="⏱️", layout="centered")
+
+restore_session()  # re-login from cookie after a page reload
 
 # ------------------------------------------------------------------ styling
 st.markdown("""
