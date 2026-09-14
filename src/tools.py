@@ -1,20 +1,38 @@
 """ShiftSnap agent tools (Strands @tool functions).
 
-All tools share one ShiftStore instance, created by make_tools().
+Tools share one store instance, created by make_tools(). The backend is
+chosen by get_store(): Supabase Postgres when SUPABASE_URL/SUPABASE_KEY are
+set, otherwise the local JSON ShiftStore (demo mode).
 """
 from __future__ import annotations
 
-from pathlib import Path
+import datetime
+import os
 
 from strands import tool
 
+from .backend import get_store
+from .ocr import find_all_timestamps, parse_photo_timestamp
 from .store import ShiftStore, fmt_duration, net_minutes
-from .ocr import parse_photo_timestamp
 from .timesheet import generate_timesheet as _generate_timesheet
 
 
-def make_tools(store: ShiftStore | None = None):
-    store = store or ShiftStore()
+def make_tools(store=None, worker_id: str | None = None):
+    store = store or get_store(worker_id)
+    is_sb = type(store).__name__ == "SupabaseShiftStore"
+
+    _SB_ONLY = {"employee_id", "lat", "lng", "accuracy", "source"}
+
+    def _call(fn, *args, **kwargs):
+        # Supabase store methods take employee_id/lat/lng/source;
+        # the JSON demo store doesn't — strip those for it.
+        if is_sb:
+            if worker_id:
+                kwargs.setdefault("employee_id", worker_id)
+        else:
+            for k in _SB_ONLY:
+                kwargs.pop(k, None)
+        return fn(*args, **kwargs)
 
     @tool
     def log_shift(date: str, time_in: str, time_out: str,
@@ -33,8 +51,8 @@ def make_tools(store: ShiftStore | None = None):
             Confirmation with the computed net hours for the shift.
         """
         try:
-            rec = store.log_shift(date, time_in, time_out,
-                                  break_start or None, break_end or None, comment)
+            rec = _call(store.log_shift, date, time_in, time_out,
+                        break_start or None, break_end or None, comment)
         except ValueError as exc:
             return f"Could not log shift: {exc}"
         brk = f" (break {rec['break_start']}-{rec['break_end']})" if rec.get("break_start") else ""
@@ -52,7 +70,7 @@ def make_tools(store: ShiftStore | None = None):
             Human-readable list of shifts with net hours per day.
         """
         try:
-            data = store.list_shifts(start_date or None, end_date or None)
+            data = _call(store.list_shifts, start_date or None, end_date or None)
         except ValueError as exc:
             return f"Could not list shifts: {exc}"
         if not data:
@@ -75,10 +93,10 @@ def make_tools(store: ShiftStore | None = None):
             Summary with total hours, approved hours (8h/day cap) and extra hours.
         """
         try:
-            s = store.summary(start_date, end_date)
+            s = _call(store.summary, start_date, end_date)
         except ValueError as exc:
             return f"Could not summarize: {exc}"
-        missing = store.missing_days(start_date, end_date)
+        missing = _call(store.missing_days, start_date, end_date)
         out = (f"Pay period {s['start']} to {s['end']}: {s['days_worked']} day(s) worked, "
                f"total {s['total_hours']} ({s['total_decimal']}h), "
                f"approved {s['approved_hours']}, extra {s['extra_hours']}.")
@@ -102,18 +120,23 @@ def make_tools(store: ShiftStore | None = None):
             path = _generate_timesheet(start_date, end_date, store)
         except ValueError as exc:
             return f"Could not generate timesheet: {exc}"
-        s = store.summary(start_date, end_date)
+        s = _call(store.summary, start_date, end_date)
         return (f"Timesheet saved to {path}. "
                 f"Covers {s['days_worked']} day(s), {s['total_hours']} total "
                 f"({s['approved_hours']} approved, {s['extra_hours']} extra).")
 
     @tool
-    def punch_clock(timestamp: str) -> str:
-        """Clock in or out from a photo timestamp (OCR text from a time snap).
+    def punch_clock(timestamp: str, lat: str = "", lng: str = "",
+                    accuracy: str = "", source: str = "chat") -> str:
+        """Clock in or out from a timestamp (photo OCR text or button tap).
 
         Args:
             timestamp: Raw text containing a timestamp, e.g.
                 'Sep 14, 2026 at 6:09:04 AM' (as read from a photo).
+            lat: GPS latitude of the punch (optional).
+            lng: GPS longitude of the punch (optional).
+            accuracy: GPS accuracy in meters (optional).
+            source: 'button', 'photo', or 'chat'.
         Returns:
             Confirmation of clock-in, or clock-out with the completed
             shift's net hours.
@@ -123,17 +146,57 @@ def make_tools(store: ShiftStore | None = None):
             return (f"Could not find a readable timestamp in: {timestamp!r}. "
                     "Try a clearer photo of the timestamp overlay.")
         try:
-            rec = store.punch(parsed["date"], parsed["time"],
-                              comment=f"photo snap {parsed['raw']}")
-        except ValueError as exc:
+            rec = _call(store.punch, parsed["date"], parsed["time"],
+                        comment=f"{source} snap {parsed['raw']}".strip(),
+                        lat=float(lat) if lat else None,
+                        lng=float(lng) if lng else None,
+                        accuracy=float(accuracy) if accuracy else None,
+                        source=source)
+        except (ValueError, TypeError) as exc:
             return f"Could not log punch: {exc}"
         if rec["action"] == "in":
             return (f"Clocked in {rec['date']} at {rec['time_in']} "
-                    f"(from photo: {parsed['raw']}). Snap your clock-out photo "
-                    "when the shift ends.")
+                    f"(from {source}: {parsed['raw']}).")
         return (f"Clocked out {rec['date']} at {rec['time_out']} "
-                f"(from photo: {parsed['raw']}). Shift {rec['time_in']} -> "
+                f"(from {source}: {parsed['raw']}). Shift {rec['time_in']} -> "
                 f"{rec['time_out']}, net {rec['net']}.")
 
+    @tool
+    def clock_now(lat: str = "", lng: str = "",
+                  accuracy: str = "") -> str:
+        """Clock in/out right now using the current time (Clock In/Out buttons).
+
+        Args:
+            lat: GPS latitude captured by the browser (optional).
+            lng: GPS longitude captured by the browser (optional).
+            accuracy: GPS accuracy in meters (optional).
+        Returns:
+            Confirmation of clock-in or clock-out with net hours.
+        """
+        now = datetime.datetime.now()
+        h12 = now.hour % 12 or 12
+        stamp = now.strftime("%b %d, %Y at ") + f"{h12}:{now:%M} {now:%p}"
+        return punch_clock(timestamp=stamp, lat=lat, lng=lng,
+                           accuracy=accuracy, source="button")
+
+    @tool
+    def import_timesheet_photo(ocr_text: str) -> str:
+        """Extract every timestamp from a weekly timesheet photo's OCR text.
+
+        Args:
+            ocr_text: Raw OCR text read from the photo.
+        Returns:
+            Numbered list of timestamps found, for the worker to review
+            before they are logged as punches.
+        """
+        found = find_all_timestamps(ocr_text)
+        if not found:
+            return ("No readable timestamps found in that photo. Make sure the "
+                    "time overlays are clear and try again.")
+        lines = [f"{i + 1}. {p['date']} {p['time']}  (read: {p['raw']})"
+                 for i, p in enumerate(found)]
+        return ("Found these timestamps — confirm which to log as punches:\n"
+                + "\n".join(lines))
+
     return [log_shift, list_shifts, pay_period_summary, generate_timesheet,
-            punch_clock]
+            punch_clock, clock_now, import_timesheet_photo]

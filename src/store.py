@@ -83,8 +83,10 @@ def net_minutes(shift: dict) -> int:
     if not shift.get("time_out"):
         return 0  # open shift: clocked in, not yet out
     gross = to_minutes(shift["time_out"]) - to_minutes(shift["time_in"])
-    if gross <= 0:
+    if gross < 0:
         gross += 24 * 60  # overnight shift past midnight
+    elif gross == 0:
+        return 0  # clocked out in the same minute: no time worked
     if shift.get("break_start") and shift.get("break_end"):
         gross -= to_minutes(shift["break_end"]) - to_minutes(shift["break_start"])
     return gross

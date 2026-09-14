@@ -36,22 +36,15 @@ def load_profile() -> dict:
     return json.loads(path.read_text())
 
 
-def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) -> str:
-    """Generate the timesheet Excel for start..end (YYYY-MM-DD). Returns file path."""
-    start = normalize_date(start)
-    end = normalize_date(end)
-    store = store or ShiftStore()
-    profile = load_profile()
-    shifts = store.list_shifts(start, end)
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Timesheet"
+def _write_sheet(ws, worker_name: str, shifts: dict, start: str, end: str,
+                 profile: dict) -> None:
+    """Fill one worksheet with a worker's timesheet. Shared by solo & team exports."""
+    ws.title = worker_name[:31]
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     ws.merge_cells("A1:J1")
     c = ws["A1"]
-    c.value = f"TIMESHEET  —  {profile.get('name', '')}  ({start} to {end})"
+    c.value = f"TIMESHEET  —  {worker_name}  ({start} to {end})"
     c.font = TITLE_FONT
     c.alignment = Alignment(vertical="center")
     ws.row_dimensions[1].height = 28
@@ -123,8 +116,62 @@ def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) ->
     ws[f"A{row + 2}"] = f"Estimated gross pay: ${est:,.2f}  ({round(total_min / 60, 2)}h × ${rate}/h)"
     ws[f"A{row + 2}"].font = Font(bold=True, size=11)
 
+
+def generate_timesheet(start: str, end: str, store: ShiftStore | None = None) -> str:
+    """Generate the timesheet Excel for start..end (YYYY-MM-DD). Returns file path."""
+    start = normalize_date(start)
+    end = normalize_date(end)
+    store = store or ShiftStore()
+    profile = load_profile()
+    shifts = store.list_shifts(start, end)
+
+    wb = openpyxl.Workbook()
+    _write_sheet(wb.active, profile.get("name", "Timesheet"), shifts,
+                 start, end, profile)
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fname = f"Timesheet_{start}_to_{end}.xlsx"
+    path = OUT_DIR / fname
+    wb.save(path)
+    return str(path)
+
+
+def generate_team_timesheet(start: str, end: str, store) -> str:
+    """Admin export: one workbook, a summary sheet plus one sheet per worker."""
+    start = normalize_date(start)
+    end = normalize_date(end)
+    profile = load_profile()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Team Summary"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    headers = ["Worker", "Days", "Total Hours", "Approved (8h/d)", "Extra Hours"]
+    for col, h in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = CENTER
+        cell.border = BORDER
+    summaries = store.team_summary(start, end)
+    for r, s in enumerate(summaries, start=2):
+        for col, v in enumerate(
+                [s["worker"], s["days_worked"], s["total_hours"],
+                 s["approved_hours"], s["extra_hours"]], start=1):
+            cell = ws.cell(row=r, column=col, value=v)
+            cell.border = BORDER
+            cell.alignment = CENTER
+    for i, w in enumerate([18, 10, 14, 14, 14], start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    for s in summaries:
+        worker = next(w for w in store.list_workers()
+                      if w["name"] == s["worker"])
+        shifts = store.list_shifts(start, end, employee_id=worker["id"])
+        _write_sheet(wb.create_sheet(), s["worker"], shifts, start, end, profile)
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    fname = f"Team_Timesheet_{start}_to_{end}.xlsx"
     path = OUT_DIR / fname
     wb.save(path)
     return str(path)

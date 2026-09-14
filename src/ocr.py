@@ -51,6 +51,7 @@ _TS_RES = [
 ]
 
 
+
 def parse_photo_timestamp(text: str) -> dict | None:
     """Find a timestamp inside OCR text.
 
@@ -93,3 +94,16 @@ def parse_photo_timestamp(text: str) -> dict | None:
         except ValueError:
             continue
     return None
+
+
+def find_all_timestamps(text: str) -> list[dict]:
+    """Find every timestamp in OCR text (for weekly timesheet photo import)."""
+    found: list[dict] = []
+    seen: set[str] = set()
+    for rx in _TS_RES:
+        for m in rx.finditer(text):
+            parsed = parse_photo_timestamp(m.group(0))
+            if parsed and parsed["raw"] not in seen:
+                seen.add(parsed["raw"])
+                found.append(parsed)
+    return found

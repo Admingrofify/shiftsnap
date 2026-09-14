@@ -126,13 +126,34 @@ class DemoModel(Model):
         text = last_user_text
         low = text.lower()
 
-        if ("punch" in low or "photo" in low or "clock in" in low
-                or "clock out" in low or "clocked" in low or "snap" in low):
+        clock_hit = (re.search(r"\bclock(\s+me)?\s*-?\s*in\b", low)
+                     or re.search(r"\bclock(\s+me)?\s*-?\s*out\b", low)
+                     or "clocked in" in low or "clocked out" in low)
+        if ("punch" in low or "photo" in low or "snap" in low
+                or "import" in low or clock_hit):
             from .ocr import parse_photo_timestamp
+            if "import" in low and "photo" in low:
+                return ("Scanning the timesheet photo for timestamps.",
+                        [{"name": "import_timesheet_photo",
+                          "input": {"ocr_text": text}}])
             parsed = parse_photo_timestamp(text)
             if parsed:
                 return ("Reading the timestamp from your photo.",
                         [{"name": "punch_clock", "input": {"timestamp": text}}])
+            if clock_hit:
+                # Clock In/Out button tap; GPS may ride along as lat=/lng=/acc=
+                lat = re.search(r"lat=([-\d.]+)", low)
+                lng = re.search(r"lng=([-\d.]+)", low)
+                acc = re.search(r"acc(?:uracy)?=([\d.]+)", low)
+                inp: dict = {}
+                if lat:
+                    inp["lat"] = lat.group(1)
+                if lng:
+                    inp["lng"] = lng.group(1)
+                if acc:
+                    inp["accuracy"] = acc.group(1)
+                return ("Clocking you in now.",
+                        [{"name": "clock_now", "input": inp}])
             return ("I couldn't read a timestamp from that photo — make sure the "
                     "time overlay is visible and try again."), []
 
